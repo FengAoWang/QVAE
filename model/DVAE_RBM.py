@@ -333,7 +333,7 @@ class VAE(nn.Module):
             epochs=100,
             lr=1e-3,
             early_stopping=True,
-            early_stopping_patience=10,
+            early_stopping_patience=15,
             ):
         if early_stopping:
             train_indices, val_indices = train_test_split(np.arange(adata.shape[0]), test_size=val_percentage, random_state=0)
