@@ -1,7 +1,9 @@
 from sklearn.model_selection import KFold
 import os
 import pickle
-
+from sklearn import metrics
+import torch.multiprocessing as mp
+import logging
 
 def split_data(dataset, adata):
     # 设置5折交叉验证
@@ -77,3 +79,43 @@ def load_fold_indices(dataset, fold_num=None):
     # 如果未指定fold_num，返回所有folds
     return all_folds
 
+
+def compute_clusters_performance(adata, cell_key, cluster_key='leiden'):
+    ARI = metrics.adjusted_rand_score(adata.obs[cell_key], adata.obs[cluster_key])
+    AMI = metrics.adjusted_mutual_info_score(adata.obs[cell_key], adata.obs[cluster_key])
+    NMI = metrics.normalized_mutual_info_score(adata.obs[cell_key], adata.obs[cluster_key])
+    HOM = metrics.homogeneity_score(adata.obs[cell_key], adata.obs[cluster_key])
+    FMI = metrics.fowlkes_mallows_score(adata.obs[cell_key], adata.obs[cluster_key])
+    return ARI, AMI, NMI, HOM, FMI
+
+
+def multiprocessing_train_fold(folds, worker_function, func_args_list, train_function):
+    processes = []
+    return_queue = mp.Queue()
+    for i in range(folds):
+        p = mp.Process(target=worker_function, args=(func_args_list[i], return_queue, train_function))
+        p.start()
+        processes.append(p)
+
+    for p in processes:
+        p.join()
+
+    results_dict = {}
+    for _ in range(folds):
+        fold_id, result = return_queue.get()
+        if result is None:
+            logging.error(f"Fold {fold_id} failed.")
+        results_dict[fold_id] = result
+
+    results = [results_dict[i] for i in range(folds)]
+    return results
+
+
+def worker_function(func_args, return_queue, train_function):
+    fold_id = func_args[2]
+    try:
+        result = train_function(*func_args)
+        return_queue.put((fold_id, result))
+    except Exception as e:
+        logging.error(f"Error in fold {fold_id}: {str(e)}")
+        return_queue.put((fold_id, None))
