@@ -207,8 +207,10 @@ class DVAE_RBM(nn.Module):
         # Early stopping variables
         best_val_elbo = float('-inf')
         patience_counter = 0
+        epoch_pbar = tqdm(range(1, epochs + 1), desc="Training Progress", total=epochs)
 
-        for epoch in range(1, epochs + 1):
+
+        for epoch in epoch_pbar:
             self.train()
             total_elbo, total_recon, total_kl = 0, 0, 0
             for batch_idx, x in enumerate(train_dataloader):
@@ -236,7 +238,12 @@ class DVAE_RBM(nn.Module):
             avg_elbo = total_elbo / len(train_dataloader)
             avg_recon = total_recon / len(train_dataloader)
             avg_kl = total_kl / len(train_dataloader)
-            print(f"Epoch [{epoch}/{epochs}], ELBO: {avg_elbo:.4f}, Recon: {avg_recon:.4f}, KL: {avg_kl:.4f}")
+            # print(f"Epoch [{epoch}/{epochs}], ELBO: {avg_elbo:.4f}, Recon: {avg_recon:.4f}, KL: {avg_kl:.4f}")
+            epoch_pbar.set_postfix({
+                'ELBO': f'{avg_elbo:.4f}',
+                'Recon': f'{avg_recon:.4f}',
+                'KL': f'{avg_kl:.4f}'
+            })
 
             if early_stopping:
                 self.eval()
@@ -258,14 +265,16 @@ class DVAE_RBM(nn.Module):
                 if avg_val_elbo > best_val_elbo:
                     best_val_elbo = avg_val_elbo
                     patience_counter = 0
-                    print("Best model updated")
+                    # tqdm.write("Best model updated")  # Print to console without disrupting the progress bar
                 else:
                     patience_counter += 1
-                    print(f"Patience counter: {patience_counter}/{early_stopping_patience}")
+                    # tqdm.write(f"Patience counter: {patience_counter}/{early_stopping_patience}")
 
                 if patience_counter >= early_stopping_patience:
-                    print(f"Early stopping triggered after {epoch} epochs")
+                    tqdm.write(f"Early stopping triggered after {epoch} epochs")
+                    epoch_pbar.close()  # Close the progress bar early
                     break
+        epoch_pbar.close()
 
 
 class VAEEncoder(nn.Module):
@@ -359,8 +368,9 @@ class VAE(nn.Module):
         # Early stopping variables
         best_val_elbo = float('-inf')
         patience_counter = 0
+        epoch_pbar = tqdm(range(1, epochs + 1), desc="Training Progress", total=epochs)
 
-        for epoch in range(1, epochs + 1):
+        for epoch in epoch_pbar:
             self.train()
             total_elbo, total_recon, total_kl = 0, 0, 0
             for batch_idx, x in enumerate(train_dataloader):
@@ -379,7 +389,13 @@ class VAE(nn.Module):
             avg_elbo = total_elbo / len(train_dataloader)
             avg_recon = total_recon / len(train_dataloader)
             avg_kl = total_kl / len(train_dataloader)
-            print(f"Epoch [{epoch}/{epochs}], ELBO: {avg_elbo:.4f}, Recon: {avg_recon:.4f}, KL: {avg_kl:.4f}")
+            # print(f"Epoch [{epoch}/{epochs}], ELBO: {avg_elbo:.4f}, Recon: {avg_recon:.4f}, KL: {avg_kl:.4f}")
+            # Update progress bar with current metrics
+            epoch_pbar.set_postfix({
+                'ELBO': f'{avg_elbo:.4f}',
+                'Recon': f'{avg_recon:.4f}',
+                'KL': f'{avg_kl:.4f}'
+            })
 
             if early_stopping:
                 self.eval()
@@ -401,14 +417,16 @@ class VAE(nn.Module):
                 if avg_val_elbo > best_val_elbo:
                     best_val_elbo = avg_val_elbo
                     patience_counter = 0
-                    print("Best model updated")
+                    # tqdm.write("Best model updated")
                 else:
                     patience_counter += 1
-                    print(f"Patience counter: {patience_counter}/{early_stopping_patience}")
+                    # tqdm.write(f"Patience counter: {patience_counter}/{early_stopping_patience}")
 
                 if patience_counter >= early_stopping_patience:
-                    print(f"Early stopping triggered after {epoch} epochs")
+                    tqdm.write(f"Early stopping triggered after {epoch} epochs")
+                    epoch_pbar.close()  # Close the progress bar early
                     break
+        epoch_pbar.close()
 
     def get_representation(self,
                            adata,
