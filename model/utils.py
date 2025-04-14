@@ -4,6 +4,10 @@ import pickle
 from sklearn import metrics
 import torch.multiprocessing as mp
 import logging
+import matplotlib.pyplot as plt
+import torch
+import scanpy as sc
+
 
 def split_data(dataset, adata):
     # 设置5折交叉验证
@@ -80,7 +84,10 @@ def load_fold_indices(dataset, fold_num=None):
     return all_folds
 
 
-def compute_clusters_performance(adata, cell_key, cluster_key='leiden'):
+def compute_clusters_performance(adata,
+                                 cell_key,
+                                 cluster_key='leiden'):
+
     ARI = metrics.adjusted_rand_score(adata.obs[cell_key], adata.obs[cluster_key])
     AMI = metrics.adjusted_mutual_info_score(adata.obs[cell_key], adata.obs[cluster_key])
     NMI = metrics.normalized_mutual_info_score(adata.obs[cell_key], adata.obs[cluster_key])
@@ -106,16 +113,60 @@ def multiprocessing_train_fold(folds, worker_function, func_args_list, train_fun
         if result is None:
             logging.error(f"Fold {fold_id} failed.")
         results_dict[fold_id] = result
+    print(results_dict)
 
     results = [results_dict[i] for i in range(folds)]
     return results
 
 
 def worker_function(func_args, return_queue, train_function):
-    fold_id = func_args[2]
+    fold_id = func_args[3]
     try:
         result = train_function(*func_args)
         return_queue.put((fold_id, result))
     except Exception as e:
         logging.error(f"Error in fold {fold_id}: {str(e)}")
         return_queue.put((fold_id, None))
+
+
+def train_fold(Model, adata, dataset_name, fold_id, params, device_id=6):
+    output_dir = f'result/{dataset_name}/'
+    os.makedirs(output_dir, exist_ok=True)
+
+    device = torch.device(f"cuda:{device_id}" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
+
+    train_idx, test_idx = load_fold_indices(dataset_name, fold_num=fold_id)
+
+    gex_adata_train = adata[train_idx, :].copy()
+    gex_adata_test = adata[test_idx, :].copy()
+
+    print(f"Data shape: {gex_adata_train.X.shape}")
+
+    model = Model(latent_dim=256, device=device)
+    model.set_adata(gex_adata_train, batch_key=params['batch_key'])
+
+    model.fit(gex_adata_train, epochs=150, lr=1e-3, early_stopping_patience=10, n_epochs_kl_warmup=50)
+
+    # Add latent representations to AnnData
+    gex_adata_test.obsm['qvae_reps'] = model.get_representation(gex_adata_test)
+    latent_test = gex_adata_test.obsm['qvae_reps']
+
+    # UMAP and clustering
+    sc.pp.neighbors(gex_adata_test, n_neighbors=10, use_rep='qvae_reps')
+    sc.tl.umap(gex_adata_test)
+    # plt.figure(figsize=(8, 3))
+    sc.pl.umap(gex_adata_test, color=[params['labels_key'], params['batch_key']], show=False)
+    plt.savefig(f'{output_dir}{dataset_name}_{Model.__name__}_cell_{fold_id}.png', dpi=1000, bbox_inches='tight')
+
+    sc.pp.neighbors(gex_adata_test, n_neighbors=10, use_rep='qvae_reps', random_state=42)
+    sc.tl.leiden(gex_adata_test, random_state=42)
+
+    # Clustering metrics
+    if params['labels_key'] in gex_adata_test.obs:
+        ARI, AMI, NMI, HOM, FMI = compute_clusters_performance(gex_adata_test, params['labels_key'])
+        print(f'ARI: {ARI:.4f}, AMI: {AMI:.4f}, NMI: {NMI:.4f}, HOM: {HOM:.4f}, FMI: {FMI:.4f}')
+        return [ARI, AMI, NMI, HOM, FMI]
+
+    else:
+        print("Warning: 'cell_type' not found in gex_data.obs. Skipping clustering metrics.")
