@@ -167,6 +167,5 @@ def train_fold(Model, adata, dataset_name, fold_id, params, device_id=6):
         ARI, AMI, NMI, HOM, FMI = compute_clusters_performance(gex_adata_test, params['labels_key'])
         print(f'ARI: {ARI:.4f}, AMI: {AMI:.4f}, NMI: {NMI:.4f}, HOM: {HOM:.4f}, FMI: {FMI:.4f}')
         return [ARI, AMI, NMI, HOM, FMI]
-
     else:
         print("Warning: 'cell_type' not found in gex_data.obs. Skipping clustering metrics.")

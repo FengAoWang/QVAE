@@ -36,7 +36,7 @@ if __name__ == "__main__":
         print(gex_data.obs.columns)
 
         # split single cell data
-        # split_data(dataset_name, gex_data)
+        split_data(dataset_name, gex_data)
         #
         device_list = [6, 6, 7, 7, 0]
 
