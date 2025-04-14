@@ -49,7 +49,6 @@ class scDataset(Dataset):
         return self.rna_tensor[idx, :], self.batch_indices[idx]
 
 
-
 class Encoder(nn.Module):
     def __init__(self, input_dim, hidden_dim, latent_dim):
         super(Encoder, self).__init__()
@@ -682,4 +681,3 @@ class VAE(nn.Module):
         reps = np.concatenate(latent_reps, axis=0)
         print(f"Latent representation shape: {reps.shape}")
         return reps
-
