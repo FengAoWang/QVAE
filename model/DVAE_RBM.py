@@ -1,3 +1,4 @@
+import anndata
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -9,50 +10,79 @@ from tqdm import tqdm
 
 
 class scDataset(Dataset):
-    def __init__(self, anndata_info):
+    def __init__(self, anndata_info, batch_indices=None):
+        """
+        Dataset class for single-cell RNA data with batch indices.
+
+        Args:
+            anndata_info (np.ndarray): Dense RNA data from AnnData.X
+            batch_indices (np.ndarray or torch.Tensor, optional): Batch indices for each sample
+        """
         self.rna_tensor = torch.tensor(anndata_info, dtype=torch.float32)
+
+        # Handle batch_indices
+        if batch_indices is not None:
+            self.batch_indices = batch_indices
+            if len(self.batch_indices) != self.rna_tensor.shape[0]:
+                raise ValueError("Length of batch_indices must match number of samples in anndata_info")
+        else:
+            self.batch_indices = torch.zeros(self.rna_tensor.shape[0], dtype=torch.long)
 
     def __len__(self):
         return self.rna_tensor.shape[0]
 
     def __getitem__(self, idx):
-        return self.rna_tensor[idx, :]
+        return self.rna_tensor[idx, :], self.batch_indices[idx]
 
 
 class Encoder(nn.Module):
-    def __init__(self, input_dim, hidden_dim, latent_dim):
+    def __init__(self, input_dim, hidden_dim, latent_dim, normalization_method="batch"):
         super(Encoder, self).__init__()
         self.fc1 = nn.Linear(input_dim, hidden_dim)
-        self.bn1 = nn.BatchNorm1d(hidden_dim)
+        if normalization_method == "batch":
+            self.norm = nn.BatchNorm1d(hidden_dim)
+        elif normalization_method == "layer":
+            self.norm = nn.LayerNorm(hidden_dim)
+        else:
+            raise ValueError("normalization_method must be 'batch' or 'layer'")
         self.dropout = nn.Dropout(0.1)
         self.fc2 = nn.Linear(hidden_dim, latent_dim)
 
     def forward(self, x):
-        h = F.relu(self.bn1(self.fc1(x)))
+        h = F.relu(self.norm(self.fc1(x)))
         q_logits = self.fc2(h)
         return q_logits
 
 
 class Decoder(nn.Module):
-    def __init__(self, latent_dim, hidden_dim, output_dim):
+    def __init__(self, latent_dim, hidden_dim, output_dim, normalization_method="batch"):
         super(Decoder, self).__init__()
         self.fc1 = nn.Linear(latent_dim, hidden_dim)
-        self.bn1 = nn.BatchNorm1d(hidden_dim)
+        if normalization_method == "batch":
+            self.norm = nn.BatchNorm1d(hidden_dim)
+        elif normalization_method == "layer":
+            self.norm = nn.LayerNorm(hidden_dim)
+        else:
+            raise ValueError("normalization_method must be 'batch' or 'layer'")
         self.dropout = nn.Dropout(0.1)
         self.fc2 = nn.Linear(hidden_dim, output_dim)
 
     def forward(self, zeta):
-        h = F.relu(self.bn1(self.fc1(zeta)))
+        h = F.relu(self.norm(self.fc1(zeta)))
         x_recon = self.fc2(h)
         return x_recon
 
 
 class RBM(nn.Module):
-    def __init__(self, latent_dim):
+    def __init__(self, latent_dim, sample_method="gibbs"):
         super(RBM, self).__init__()
         self.h = nn.Parameter(torch.zeros(latent_dim))
         self.W = nn.Parameter(torch.randn(latent_dim, latent_dim) * 0.001)  # 对称权重
         self.latent_dim = latent_dim
+        self.sample_method = sample_method  # 修改位置：使用传入的 sample_method 参数
+
+    def get_para(self):
+        return self.W, self.h
 
     def energy(self, z):
         z = z.float()
@@ -60,51 +90,177 @@ class RBM(nn.Module):
         w_term = torch.sum((z @ self.W) * z, dim=-1)  # 注意对称性
         return h_term + w_term
 
-    def gibbs_sampling(self, num_samples, steps=30):
+    def gibbs_sampling(self, num_samples, steps=10):
         z = torch.randint(0, 2, (num_samples, self.latent_dim), dtype=torch.float).to(self.h.device)
         for _ in range(steps):
             probs = torch.sigmoid(self.h + z @ self.W)
             z = (torch.rand_like(z) < probs).float()
         return z
 
-    def compute_gradients(self, z_positive, num_negative_samples=64, gibbs_steps=30):
-        """计算正相和负相的梯度"""
-        # 正相：E_q[∂E/∂θ]
-        z_positive = z_positive.float()
-        positive_h_grad = z_positive.mean(dim=0)  # ∂E/∂h = z_l
-        positive_w_grad = torch.einsum('bi,bj->ij', z_positive, z_positive) / z_positive.size(0)  # ∂E/∂W = z_l z_m
+    def ising_sampling_noise(self, number_of_samples, number_of_hidden_units):
+        total_units = number_of_hidden_units + number_of_hidden_units
+        adjacency_matrix = torch.zeros((total_units, total_units), device=self.h.device)
+        for i in range(number_of_hidden_units):
+            for j in range(number_of_hidden_units):
+                value = 0.25 * self.W[i, j]
+                adjacency_matrix[i, number_of_hidden_units + j] = value
+                adjacency_matrix[number_of_hidden_units + j, i] = value
 
-        # 负相：E_p[∂E/∂θ]
-        z_negative = self.gibbs_sampling(num_negative_samples, steps=gibbs_steps)
-        negative_h_grad = z_negative.mean(dim=0)
-        negative_w_grad = torch.einsum('bi,bj->ij', z_negative, z_negative) / z_negative.size(0)
+        bias_terms = torch.zeros(total_units, device=self.h.device)
+        for i in range(number_of_hidden_units):
+            bias_terms[i] = 0.5 * self.h[i] + 0.25 * torch.sum(self.W[i, :])
+        for j in range(number_of_hidden_units):
+            bias_terms[number_of_hidden_units + j] = 0.5 * self.h[j] + 0.25 * torch.sum(self.W[:, j])
 
-        # 总梯度
-        h_grad = positive_h_grad - negative_h_grad
-        w_grad = positive_w_grad - negative_w_grad
-        # 对称化W的梯度（因为RBM假设W对称）
-        w_grad = (w_grad + w_grad.T) / 2
-        return {'h': h_grad, 'W': w_grad}
+        self_strength = 0.9
+        neighbor_strength = 0.1
+        noise_strength = 0.12
+
+        chain_state = torch.zeros(total_units, device=self.h.device)
+        samples = []
+        for _ in range(number_of_samples):
+            chain_state = self.torch_map_clip(chain_state, adjacency_matrix, bias_terms, self_strength,
+                                              neighbor_strength, noise_strength)
+            samples.append(chain_state.clone())
+        result = torch.stack(samples, dim=0)
+        latent_variable = 0.5 * (torch.sign(result) + 1)
+        return latent_variable[:, :number_of_hidden_units]
+
+    def torch_map_clip(self, chain_state, adjacency_matrix, bias_terms, self_strength, neighbor_strength,
+                       noise_strength):
+        noise = torch.randn(chain_state.shape, device=chain_state.device) * noise_strength
+        out = self_strength * chain_state + neighbor_strength * torch.matmul(adjacency_matrix,
+                                                                             chain_state) + 0.40 * neighbor_strength * bias_terms + noise
+        return torch.clamp(out, min=-0.4, max=0.4)
+
+    def ising_sampling_fsa(self, number_of_samples, number_of_hidden_units):
+        import kaiwu as kw
+        total_units = number_of_hidden_units + number_of_hidden_units
+        adjacency_matrix = torch.zeros((total_units, total_units), device=self.h.device)
+        for i in range(number_of_hidden_units):
+            for j in range(number_of_hidden_units):
+                value = 0.25 * self.W[i, j]
+                adjacency_matrix[i, number_of_hidden_units + j] = value
+                adjacency_matrix[number_of_hidden_units + j, i] = value
+
+        bias_terms = torch.zeros(total_units, device=self.h.device)
+        for i in range(number_of_hidden_units):
+            bias_terms[i] = 0.5 * self.h[i] + 0.25 * torch.sum(self.W[i, :])
+        for j in range(number_of_hidden_units):
+            bias_terms[number_of_hidden_units + j] = 0.5 * self.h[j] + 0.25 * torch.sum(self.W[:, j])
+
+        # FsatSA
+        worker = kw.classical.FastSimulatedAnnealingOptimizer(initial_temperature=1000,
+                                                              alpha=0.9,
+                                                              cutoff_temperature=0.001,
+                                                              iterations_per_t=number_of_samples,
+                                                              size_limit=number_of_samples,
+                                                              rand_seed=512,
+                                                              )
+        left_part = torch.cat([
+            adjacency_matrix,
+            bias_terms.unsqueeze(0)
+        ], dim=0)
+
+        right_part = torch.cat([
+            bias_terms.view(-1, 1),
+            torch.zeros(1, 1, device=self.h.device)
+        ], dim=0)
+        # 水平拼接左右部分并取负
+        ising_matrix = -torch.cat([left_part, right_part], dim=1)  # 最终形状 (d+1, d+1)
+
+        output = worker.solve(ising_matrix.cpu().detach().numpy())
+        result = [sample[:-1] * sample[-1] for sample in output]
+        result = kw.sampler.spin_to_binary(np.array(result))
+        return torch.tensor(result[:, :number_of_hidden_units], device=self.h.device, dtype=torch.float32)
+
+    def compute_gradients(self, positive_latent_variable, number_of_negative_samples=64, use_ising_sampling=False):
+        positive_latent_variable = positive_latent_variable.float()
+        positive_hidden_gradient = positive_latent_variable.mean(dim=0)
+        positive_weight_gradient = torch.einsum('bi,bj->ij', positive_latent_variable,
+                                                positive_latent_variable) / positive_latent_variable.size(0)
+        if self.sample_method == "ising_noise":
+            negative_latent_variable = self.ising_sampling_noise(number_of_negative_samples, self.latent_dim)
+        elif self.sample_method == "ising_fsa":
+            negative_latent_variable = self.ising_sampling_fsa(number_of_negative_samples, self.latent_dim)
+        elif self.sample_method == "gibbs":
+            negative_latent_variable = self.gibbs_sampling(number_of_negative_samples)
+        else:
+            raise ValueError("Invalid sample method")
+        negative_hidden_gradient = negative_latent_variable.mean(dim=0)
+        negative_weight_gradient = torch.einsum('bi,bj->ij', negative_latent_variable,
+                                                negative_latent_variable) / negative_latent_variable.size(0)
+        hidden_gradient = positive_hidden_gradient - negative_hidden_gradient
+        weight_gradient = positive_weight_gradient - negative_weight_gradient
+        weight_gradient = (weight_gradient + weight_gradient.T) / 2
+        return {'hidden_biases': hidden_gradient, 'weights': weight_gradient}
 
 
 class DVAE_RBM(nn.Module):
     def __init__(self,
-                 input_dim,
                  hidden_dim=512,
                  latent_dim=256,
                  beta=0.5,
-                 beta_kl=0.001,
-                 use_batch_norm=True,
-                 use_layer_norm=True,
+                 beta_kl=0.0001,
+                 normalization_method="batch",
+                 sample_method='gibbs',
                  device=torch.device('cpu')):
         super(DVAE_RBM, self).__init__()
-        self.encoder = Encoder(input_dim, hidden_dim, latent_dim)
-        self.decoder = Decoder(latent_dim, hidden_dim, input_dim)
-        self.rbm = RBM(latent_dim)
-        self.beta = beta
+        self.hidden_dim = hidden_dim
         self.latent_dim = latent_dim
-        self.device = device
+        self.beta = beta
         self.beta_kl = beta_kl
+        self.device = device
+        self.normalization_method = normalization_method
+        self.sample_method = sample_method
+
+        self.input_dim = None
+        self.n_batches = None
+        self.encoder = None
+        self.decoder = None
+        self.rbm = None
+
+        self.adata = None
+        self.batch_key = None
+        self.batch_indices = None
+
+        self.to(device)
+
+    def set_adata(self,
+                  adata: anndata.AnnData,
+                  batch_key='batch'):
+        """
+        Store AnnData object, set input_dim, and initialize model components.
+        """
+        self.adata = adata.copy()
+        self.batch_key = batch_key
+
+        self.input_dim = adata.X.shape[1]
+
+        if batch_key not in adata.obs:
+            raise ValueError(f"Batch key '{batch_key}' not found in adata.obs")
+
+        batch_categories = adata.obs[batch_key].astype('category')
+        self.batch_indices = torch.tensor(batch_categories.cat.codes.values, dtype=torch.long)
+        self.n_batches = len(batch_categories.cat.categories)
+
+        self.encoder = Encoder(
+            self.input_dim,
+            self.hidden_dim,
+            self.latent_dim,
+            normalization_method=self.normalization_method
+        ).to(self.device)
+
+        self.decoder = Decoder(
+            self.latent_dim + self.n_batches,
+            self.hidden_dim,
+            self.input_dim,
+            normalization_method=self.normalization_method
+        ).to(self.device)
+
+        self.rbm = RBM(self.latent_dim, sample_method=self.sample_method).to(self.device)
+
+        print(f"Set AnnData with input_dim={self.input_dim}, {self.n_batches} batches")
 
     def reparameterize(self, q_logits, rho):
         q = torch.sigmoid(q_logits)
@@ -118,17 +274,8 @@ class DVAE_RBM(nn.Module):
         z = (zeta > 0).float()
         return zeta, z, q
 
-    # def kl_divergence(self, z, q):
-    #     # 熵项 H(q_phi)
-    #     q = torch.clamp(q, min=1e-7, max=1 - 1e-7)
-    #     entropy = -(q * torch.log(q) + (1 - q) * torch.log(1 - q)).sum(dim=-1)
-    #     # 交叉熵项 H(q_phi, p_theta) = E[E_theta] + log Z_theta
-    #     energy = self.rbm.energy(z).mean()
-    #     # 负相通过采样近似（这里仅用于监控，不直接影响梯度）
-    #     z_samples = self.rbm.gibbs_sampling(z.size(0))
-    #     energy_samples = self.rbm.energy(z_samples).mean()
-    #     cross_entropy = energy  # log Z_theta 被正负相差分抵消
-    #     return (entropy - (-cross_entropy)).mean()
+    def _get_batch_one_hot(self, indices):
+        return F.one_hot(indices, num_classes=self.n_batches).float().to(self.device)
 
     def kl_divergence(self, z, q):
         q = torch.clamp(q, min=1e-7, max=1 - 1e-7)
@@ -137,36 +284,46 @@ class DVAE_RBM(nn.Module):
         energy_pos = self.rbm.energy(z)
         z_negative = self.rbm.gibbs_sampling(z.size(0))
         energy_neg = self.rbm.energy(z_negative)
-        # 用负相能量的均值作为 logZ 的近似
         logZ = energy_neg.mean()
-        # print(energy_pos)
-        # print(entropy)
-        # print(logZ)
         kl = (energy_pos - entropy + logZ).mean()
         return kl
 
-    def forward(self, x):
+    def forward(self, x, batch_indices):
+        batch_one_hot = self._get_batch_one_hot(batch_indices)
+
         q_logits = self.encoder(x)
         rho = Uniform(0, 1).sample(q_logits.shape).to(x.device)
         zeta, z, q = self.reparameterize(q_logits, rho)
-        x_recon = self.decoder(zeta)
+
+        decoder_input = torch.cat([zeta, batch_one_hot], dim=-1)
+        x_recon = self.decoder(decoder_input)
         recon_loss = F.mse_loss(x_recon, x, reduction='sum') / x.size(0)
         kl_loss = self.kl_divergence(z, q)
         elbo = -recon_loss - self.beta_kl * kl_loss
         return elbo, recon_loss, kl_loss, z, zeta
 
     def get_representation(self,
-                           adata,
-                           batch_size=128,):
+                           adata=None,
+                           batch_size=128):
+        if adata is None and self.adata is None:
+            raise ValueError("No AnnData object provided or set")
+        adata = adata if adata is not None else self.adata
+
+        adata_array = adata.X.toarray() if hasattr(adata.X, 'toarray') else adata.X
+        batch_indices = torch.tensor(adata.obs[self.batch_key].astype('category').cat.codes.values, dtype=torch.long)
+
+        dataset = scDataset(adata_array, batch_indices)
+        dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=4)
+
         self.eval()
         latent_reps = []
-        adata_array = adata.X.toarray() if hasattr(adata.X, 'toarray') else adata.X
-        sc_dataset = scDataset(adata_array)
         with torch.no_grad():
-            for x in DataLoader(sc_dataset, batch_size=batch_size, shuffle=False, num_workers=4):
+            for x, batch_idx in dataloader:
                 x = x.to(self.device)
-                _, _, _, _, zeta = self(x)
+                batch_idx = batch_idx.to(self.device)
+                _, _, _, z, zeta = self(x, batch_idx)
                 latent_reps.append(zeta.cpu().numpy())
+
         reps = np.concatenate(latent_reps, axis=0)
         print(f"Latent representation shape: {reps.shape}")
         return reps
@@ -176,57 +333,87 @@ class DVAE_RBM(nn.Module):
             val_percentage=0.1,
             batch_size=128,
             epochs=100,
-            beta=0.5,
-            lr=1e-3,
-            rbm_lr=1e-4,
+            lr=1e-4,
+            rbm_lr=1e-3,
             early_stopping=True,
-            early_stopping_patience=15,):
+            early_stopping_patience=10,
+            n_epochs_kl_warmup=None,
+            verbose=0):
+
+        if adata is None and self.adata is None:
+            raise ValueError("No AnnData object provided or set")
+        adata = adata if adata is not None else self.adata
+
+        adata_array = adata.X.toarray() if hasattr(adata.X, 'toarray') else adata.X
+        batch_indices = torch.tensor(adata.obs[self.batch_key].astype('category').cat.codes.values, dtype=torch.long)
 
         if early_stopping:
-            train_indices, val_indices = train_test_split(np.arange(adata.shape[0]), test_size=val_percentage, random_state=0)
+            train_indices, val_indices = train_test_split(
+                np.arange(adata.shape[0]), test_size=val_percentage, random_state=0
+            )
 
-            adata_train = adata[train_indices, :].copy()
-            adata_val = adata[val_indices, :].copy()
+            adata_train_array = adata_array[train_indices]
+            adata_val_array = adata_array[val_indices]
+            train_batch_indices = batch_indices[train_indices]
+            val_batch_indices = batch_indices[val_indices]
 
-            adata_train_array = adata_train.X.toarray() if hasattr(adata_train.X, 'toarray') else adata_train.X
-            adata_val_array = adata_val.X.toarray() if hasattr(adata_val.X, 'toarray') else adata_val.X
-
-            sc_val_dataset = scDataset(adata_val_array)
-            val_dataloader = DataLoader(sc_val_dataset, batch_size=batch_size, shuffle=True, num_workers=4)
+            val_dataset = torch.utils.data.TensorDataset(
+                torch.tensor(adata_val_array, dtype=torch.float32),
+                val_batch_indices
+            )
+            val_dataloader = DataLoader(val_dataset, batch_size=batch_size, shuffle=True, num_workers=4)
         else:
-            adata_train_array = adata.X.toarray() if hasattr(adata.X, 'toarray') else adata.X
+            adata_train_array = adata_array
+            train_batch_indices = batch_indices
 
-        sc_train_dataset = scDataset(adata_train_array)
-        train_dataloader = DataLoader(sc_train_dataset, batch_size=batch_size, shuffle=True, num_workers=4)
+        train_dataset = torch.utils.data.TensorDataset(
+            torch.tensor(adata_train_array, dtype=torch.float32),
+            train_batch_indices
+        )
+        train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=4)
 
         optimizer = torch.optim.Adam(
             list(self.encoder.parameters()) + list(self.decoder.parameters()), lr=lr
         )
         rbm_optimizer = torch.optim.Adam(self.rbm.parameters(), lr=rbm_lr)
 
-        # Early stopping variables
         best_val_elbo = float('-inf')
         patience_counter = 0
         epoch_pbar = tqdm(range(1, epochs + 1), desc="Training Progress", total=epochs)
+        best_state_dict = None
 
+        kl_warmup_epochs = n_epochs_kl_warmup or epochs
+
+        # 初始化存储中间结果的变量
+        intermediate_results = {
+            'rbm_params': [],
+            'all_train_elbo': [],
+            'all_val_elbo': []
+        } if verbose == 1 else None
 
         for epoch in epoch_pbar:
             self.train()
             total_elbo, total_recon, total_kl = 0, 0, 0
-            for batch_idx, x in enumerate(train_dataloader):
+            for x, batch_idx in train_dataloader:
                 x = x.to(self.device)
                 optimizer.zero_grad()
                 rbm_optimizer.zero_grad()
 
-                elbo, recon_loss, kl_loss, z, zeta = self(x)
+                elbo, recon_loss, kl_loss, z, zeta = self(x, batch_idx)
                 loss = -elbo
                 loss.backward()
 
-                # 手动计算RBM的梯度
-                rbm_grads = self.rbm.compute_gradients(z.detach())  # z.detach()避免重复求导
+                if verbose == 1:
+                    with torch.no_grad():
+                        current_W = self.rbm.W.detach().clone().cpu().numpy()
+                        current_h = self.rbm.h.detach().clone().cpu().numpy()
+                        intermediate_results['rbm_params'].append({'W': current_W, 'h': current_h})
+
+                rbm_grads = self.rbm.compute_gradients(z.detach())
                 with torch.no_grad():
-                    self.rbm.h.grad = rbm_grads['h']
-                    self.rbm.W.grad = rbm_grads['W']
+                    # 注意：这里直接赋值梯度
+                    self.rbm.h.grad = rbm_grads['hidden_biases']
+                    self.rbm.W.grad = rbm_grads['weights']
 
                 optimizer.step()
                 rbm_optimizer.step()
@@ -238,60 +425,68 @@ class DVAE_RBM(nn.Module):
             avg_elbo = total_elbo / len(train_dataloader)
             avg_recon = total_recon / len(train_dataloader)
             avg_kl = total_kl / len(train_dataloader)
-            # print(f"Epoch [{epoch}/{epochs}], ELBO: {avg_elbo:.4f}, Recon: {avg_recon:.4f}, KL: {avg_kl:.4f}")
             epoch_pbar.set_postfix({
+                'KL_weight': f'{self.beta_kl}',
                 'ELBO': f'{avg_elbo:.4f}',
                 'Recon': f'{avg_recon:.4f}',
                 'KL': f'{avg_kl:.4f}'
             })
+            if verbose == 1:
+                intermediate_results['all_train_elbo'].append(avg_elbo)
 
             if early_stopping:
                 self.eval()
                 val_total_elbo, val_total_recon, val_total_kl = 0, 0, 0
-                for batch_idx, x in enumerate(val_dataloader):
+                for x, batch_idx in val_dataloader:
                     x = x.to(self.device)
                     with torch.no_grad():
-                        elbo, recon_loss, kl_loss, z, zeta = self(x)
-
+                        elbo, recon_loss, kl_loss, z, zeta = self(x, batch_idx)
                     val_total_elbo += elbo.item()
                     val_total_recon += recon_loss.item()
                     val_total_kl += kl_loss.item()
 
                 avg_val_elbo = val_total_elbo / len(val_dataloader)
-                avg_recon = val_total_recon / len(val_dataloader)
-                avg_kl = val_total_kl / len(val_dataloader)
+                if verbose == 1:
+                    intermediate_results['all_val_elbo'].append(avg_val_elbo)
 
-                # Early stopping logic
                 if avg_val_elbo > best_val_elbo:
                     best_val_elbo = avg_val_elbo
                     patience_counter = 0
-                    # tqdm.write("Best model updated")  # Print to console without disrupting the progress bar
+                    best_state_dict = self.state_dict()
                 else:
                     patience_counter += 1
-                    # tqdm.write(f"Patience counter: {patience_counter}/{early_stopping_patience}")
 
                 if patience_counter >= early_stopping_patience:
                     tqdm.write(f"Early stopping triggered after {epoch} epochs")
-                    epoch_pbar.close()  # Close the progress bar early
+                    if best_state_dict is not None:
+                        self.load_state_dict(best_state_dict)
+                    epoch_pbar.close()
                     break
+
         epoch_pbar.close()
+
+        if verbose == 1:
+            return intermediate_results
+        else:
+            return None
 
 
 class VAEEncoder(nn.Module):
-    def __init__(self,
-                 input_dim,
-                 hidden_dim,
-                 latent_dim):
+    def __init__(self, input_dim, hidden_dim, latent_dim, normalization_method="batch"):
         super(VAEEncoder, self).__init__()
         self.fc1 = nn.Linear(input_dim, hidden_dim)
-        self.bn1 = nn.BatchNorm1d(hidden_dim)
+        if normalization_method == "batch":
+            self.norm = nn.BatchNorm1d(hidden_dim)
+        elif normalization_method == "layer":
+            self.norm = nn.LayerNorm(hidden_dim)
+        else:
+            raise ValueError("normalization_method must be 'batch' or 'layer'")
         self.dropout = nn.Dropout(0.1)
-        # For VAE, we need two outputs: mean and log-variance
         self.fc_mu = nn.Linear(hidden_dim, latent_dim)
         self.fc_logvar = nn.Linear(hidden_dim, latent_dim)
 
     def forward(self, x):
-        h = F.relu(self.bn1(self.fc1(x)))
+        h = F.relu(self.norm(self.fc1(x)))
         mu = self.fc_mu(h)
         logvar = self.fc_logvar(h)
         return mu, logvar
@@ -299,17 +494,63 @@ class VAEEncoder(nn.Module):
 
 class VAE(nn.Module):
     def __init__(self,
-                 input_dim,
                  hidden_dim=512,
                  latent_dim=256,
-                 beta_kl=0.001,
+                 beta_kl=0.0001,
+                 normalization_method="batch",  # 修改位置
                  device=torch.device('cpu')):
         super(VAE, self).__init__()
-        self.encoder = VAEEncoder(input_dim, hidden_dim, latent_dim)
-        self.decoder = Decoder(latent_dim, hidden_dim, input_dim)
-        self.beta_kl = beta_kl
+        self.hidden_dim = hidden_dim
         self.latent_dim = latent_dim
+        self.beta_kl = beta_kl
+        self.normalization_method = normalization_method  # 修改位置
         self.device = device
+
+        self.input_dim = None
+        self.n_batches = None
+        self.encoder = None
+        self.decoder = None
+
+        self.adata = None
+        self.batch_key = None
+        self.batch_indices = None
+
+        self.to(device)
+
+    def set_adata(self,
+                  adata: anndata.AnnData,
+                  batch_key='batch'):
+        """
+        Store AnnData object, set input_dim, and initialize model components.
+        """
+        self.adata = adata.copy()
+        self.batch_key = batch_key
+
+        self.input_dim = adata.X.shape[1]
+
+        if batch_key not in adata.obs:
+            raise ValueError(f"Batch key '{batch_key}' not found in adata.obs")
+
+        batch_categories = adata.obs[batch_key].astype('category')
+        self.batch_indices = torch.tensor(batch_categories.cat.codes.values, dtype=torch.long)
+        self.n_batches = len(batch_categories.cat.categories)
+
+        # 修改位置：传入 normalization_method 给 VAEEncoder 和 Decoder
+        self.encoder = VAEEncoder(
+            self.input_dim,
+            self.hidden_dim,
+            self.latent_dim,
+            normalization_method=self.normalization_method  # 修改位置
+        ).to(self.device)
+
+        self.decoder = Decoder(
+            self.latent_dim + self.n_batches,
+            self.hidden_dim,
+            self.input_dim,
+            normalization_method=self.normalization_method  # 修改位置
+        ).to(self.device)
+
+        print(f"Set AnnData with input_dim={self.input_dim}, {self.n_batches} batches")
 
     def reparameterize(self, mu, logvar):
         std = torch.exp(0.5 * logvar)
@@ -318,66 +559,89 @@ class VAE(nn.Module):
         return z
 
     def kl_divergence(self, mu, logvar):
-        # Analytical KL divergence for Gaussian prior N(0,1)
         kl = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp(), dim=-1)
         return kl.mean()
 
-    def forward(self, x):
+    def _get_batch_one_hot(self, indices):
+        return F.one_hot(indices, num_classes=self.n_batches).float().to(self.device)
+
+    def forward(self, x, batch_indices):
+        batch_one_hot = self._get_batch_one_hot(batch_indices)
+
         mu, logvar = self.encoder(x)
         z = self.reparameterize(mu, logvar)
-        x_recon = self.decoder(z)
-        # Reconstruction loss
+
+        decoder_input = torch.cat([z, batch_one_hot], dim=-1)
+        x_recon = self.decoder(decoder_input)
+
         recon_loss = F.mse_loss(x_recon, x, reduction='sum') / x.size(0)
-        # KL divergence
         kl_loss = self.kl_divergence(mu, logvar)
-        # ELBO (Evidence Lower Bound)
-        elbo = -recon_loss - 0.001 * kl_loss
+        elbo = -recon_loss - self.beta_kl * kl_loss
 
         return elbo, recon_loss, kl_loss, z
 
     def fit(self,
-            adata,
+            adata=None,
             val_percentage=0.1,
             batch_size=128,
             epochs=100,
             lr=1e-3,
             early_stopping=True,
-            early_stopping_patience=15,
+            early_stopping_patience=10,
+            n_epochs_kl_warmup=None,
+            verbose=0
             ):
+        if adata is None and self.adata is None:
+            raise ValueError("No AnnData object provided or set")
+        adata = adata if adata is not None else self.adata
+
+        adata_array = adata.X.toarray() if hasattr(adata.X, 'toarray') else adata.X
+        batch_indices = torch.tensor(adata.obs[self.batch_key].astype('category').cat.codes.values, dtype=torch.long)
+
+        # 初始化存储中间结果的变量
+        intermediate_results = {
+            'rbm_params': [],
+            'all_train_elbo': [],
+            'all_val_elbo': []
+        } if verbose == 1 else None
+
         if early_stopping:
-            train_indices, val_indices = train_test_split(np.arange(adata.shape[0]), test_size=val_percentage, random_state=0)
+            train_indices, val_indices = train_test_split(
+                np.arange(adata.shape[0]), test_size=val_percentage, random_state=0
+            )
 
-            adata_train = adata[train_indices, :].copy()
-            adata_val = adata[val_indices, :].copy()
+            adata_train_array = adata_array[train_indices]
+            adata_val_array = adata_array[val_indices]
+            train_batch_indices = batch_indices[train_indices]
+            val_batch_indices = batch_indices[val_indices]
 
-            adata_train_array = adata_train.X.toarray() if hasattr(adata_train.X, 'toarray') else adata_train.X
-            adata_val_array = adata_val.X.toarray() if hasattr(adata_val.X, 'toarray') else adata_val.X
-
-            sc_val_dataset = scDataset(adata_val_array)
-            val_dataloader = DataLoader(sc_val_dataset, batch_size=batch_size, shuffle=True, num_workers=4)
+            val_dataset = scDataset(adata_val_array, val_batch_indices)
+            val_dataloader = DataLoader(val_dataset, batch_size=batch_size, shuffle=True, num_workers=4)
         else:
-            adata_train_array = adata.X.toarray() if hasattr(adata.X, 'toarray') else adata.X
+            adata_train_array = adata_array
+            train_batch_indices = batch_indices
 
-        sc_train_dataset = scDataset(adata_train_array)
-        train_dataloader = DataLoader(sc_train_dataset, batch_size=batch_size, shuffle=True, num_workers=4)
+        train_dataset = scDataset(adata_train_array, train_batch_indices)
+        train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=4)
 
-        optimizer = torch.optim.Adam(
-            self.parameters(), lr=lr
-        )
+        optimizer = torch.optim.Adam(self.parameters(), lr=lr)
 
-        # Early stopping variables
         best_val_elbo = float('-inf')
         patience_counter = 0
         epoch_pbar = tqdm(range(1, epochs + 1), desc="Training Progress", total=epochs)
+        best_state_dict = None
+
+        kl_warmup_epochs = n_epochs_kl_warmup or epochs
 
         for epoch in epoch_pbar:
             self.train()
             total_elbo, total_recon, total_kl = 0, 0, 0
-            for batch_idx, x in enumerate(train_dataloader):
+            for x, batch_idx in train_dataloader:
                 x = x.to(self.device)
+                batch_idx = batch_idx.to(self.device)
                 optimizer.zero_grad()
 
-                elbo, recon_loss, kl_loss, z = self(x)
+                elbo, recon_loss, kl_loss, z = self(x, batch_idx)
                 loss = -elbo
                 loss.backward()
                 optimizer.step()
@@ -389,9 +653,10 @@ class VAE(nn.Module):
             avg_elbo = total_elbo / len(train_dataloader)
             avg_recon = total_recon / len(train_dataloader)
             avg_kl = total_kl / len(train_dataloader)
-            # print(f"Epoch [{epoch}/{epochs}], ELBO: {avg_elbo:.4f}, Recon: {avg_recon:.4f}, KL: {avg_kl:.4f}")
-            # Update progress bar with current metrics
+            if verbose == 1:
+                intermediate_results['all_train_elbo'].append(avg_elbo)
             epoch_pbar.set_postfix({
+                'KL_weight': f'{self.beta_kl}',
                 'ELBO': f'{avg_elbo:.4f}',
                 'Recon': f'{avg_recon:.4f}',
                 'KL': f'{avg_kl:.4f}'
@@ -400,47 +665,62 @@ class VAE(nn.Module):
             if early_stopping:
                 self.eval()
                 val_total_elbo, val_total_recon, val_total_kl = 0, 0, 0
-                for batch_idx, x in enumerate(val_dataloader):
+                for x, batch_idx in val_dataloader:
                     x = x.to(self.device)
+                    batch_idx = batch_idx.to(self.device)
                     with torch.no_grad():
-                        elbo, recon_loss, kl_loss, z = self(x)
+                        elbo, recon_loss, kl_loss, z = self(x, batch_idx)
 
                     val_total_elbo += elbo.item()
                     val_total_recon += recon_loss.item()
                     val_total_kl += kl_loss.item()
 
                 avg_val_elbo = val_total_elbo / len(val_dataloader)
-                avg_recon = val_total_recon / len(val_dataloader)
-                avg_kl = val_total_kl / len(val_dataloader)
+                if verbose == 1:
+                    intermediate_results['all_val_elbo'].append(avg_val_elbo)
 
-                # Early stopping logic
                 if avg_val_elbo > best_val_elbo:
-                    best_val_elbo = avg_val_elbo
+                    best_val_elbo = val_total_elbo / len(val_dataloader)
                     patience_counter = 0
-                    # tqdm.write("Best model updated")
+                    best_state_dict = self.state_dict()
                 else:
                     patience_counter += 1
-                    # tqdm.write(f"Patience counter: {patience_counter}/{early_stopping_patience}")
 
                 if patience_counter >= early_stopping_patience:
                     tqdm.write(f"Early stopping triggered after {epoch} epochs")
-                    epoch_pbar.close()  # Close the progress bar early
+                    if best_state_dict is not None:
+                        self.load_state_dict(best_state_dict)
+                    epoch_pbar.close()
                     break
         epoch_pbar.close()
 
+        if verbose == 1:
+            return intermediate_results
+        else:
+            return None
+
     def get_representation(self,
-                           adata,
-                           batch_size=128,):
+                           adata=None,
+                           batch_size=128):
+        if adata is None and self.adata is None:
+            raise ValueError("No AnnData object provided or set")
+        adata = adata if adata is not None else self.adata
+
+        adata_array = adata.X.toarray() if hasattr(adata.X, 'toarray') else adata.X
+        batch_indices = torch.tensor(adata.obs[self.batch_key].astype('category').cat.codes.values, dtype=torch.long)
+
+        dataset = scDataset(adata_array, batch_indices)
+        dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=4)
+
         self.eval()
         latent_reps = []
-        adata_array = adata.X.toarray() if hasattr(adata.X, 'toarray') else adata.X
-        sc_dataset = scDataset(adata_array)
         with torch.no_grad():
-            for x in DataLoader(sc_dataset, batch_size=batch_size, shuffle=False, num_workers=4):
+            for x, batch_idx in dataloader:
                 x = x.to(self.device)
-                _, _, _, z = self(x)
+                batch_idx = batch_idx.to(self.device)
+                _, _, _, z = self(x, batch_idx)
                 latent_reps.append(z.cpu().numpy())
+
         reps = np.concatenate(latent_reps, axis=0)
         print(f"Latent representation shape: {reps.shape}")
         return reps
-
