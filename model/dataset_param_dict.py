@@ -21,6 +21,12 @@ dataset_params = {
     #     file_path="/mnt/zhangzheng_group/xuany-54/QVAE/data/PBMC_RNA_filter.h5ad"
     # ),
 
+    'pancreas*20': dict(
+        dataset_name="pancreas*20",
+        batch_key="tech",
+        labels_key="celltype",
+        file_path="/mnt/zhangzheng_group/xuany-54/QVAE/data/pancreas_processed*20.h5ad"
+    ),
 
     'immune*20': dict(
         dataset_name="immune*20",
@@ -51,11 +57,6 @@ dataset_params = {
         labels_key="cell_type",
         file_path="/mnt/zhangzheng_group/xuany-54/QVAE/data/HLCA_core_processed*20.h5ad",
     ),
-    'pancreas*20': dict(
-        dataset_name="pancreas*20",
-        batch_key="tech",
-        labels_key="celltype",
-        file_path="/mnt/zhangzheng_group/xuany-54/QVAE/data/pancreas_processed*20.h5ad"
-    ),
+    #
 
 }

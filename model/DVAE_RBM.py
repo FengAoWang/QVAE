@@ -7,6 +7,8 @@ from torch.utils.data import Dataset, DataLoader
 import numpy as np
 from sklearn.model_selection import train_test_split
 from tqdm import tqdm
+import kaiwu as kw
+import time
 
 
 class scDataset(Dataset):
@@ -80,6 +82,14 @@ class RBM(nn.Module):
         self.W = nn.Parameter(torch.randn(latent_dim, latent_dim) * 0.001)  # 对称权重
         self.latent_dim = latent_dim
         self.sample_method = sample_method  # 修改位置：使用传入的 sample_method 参数
+        self.ising_matrix = self._create_ising_matrix(self.latent_dim)
+        self.worker = kw.classical.SimulatedAnnealingOptimizer(initial_temperature=1000,
+                                                               alpha=0.5,
+                                                               cutoff_temperature=0.001,
+                                                               iterations_per_t=10,
+                                                               size_limit=10,
+                                                               rand_seed=512,
+                                                               )
 
     def get_para(self):
         return self.W, self.h
@@ -89,6 +99,46 @@ class RBM(nn.Module):
         h_term = torch.sum(z * self.h, dim=-1)
         w_term = torch.sum((z @ self.W) * z, dim=-1)  # 注意对称性
         return h_term + w_term
+
+    def _create_ising_matrix(self, number_of_hidden_units):
+        total_units = number_of_hidden_units + number_of_hidden_units
+        adjacency_matrix = torch.zeros((total_units, total_units), device=self.h.device)
+        for i in range(number_of_hidden_units):
+            for j in range(number_of_hidden_units):
+                value = 0.25 * self.W[i, j]
+                adjacency_matrix[i, number_of_hidden_units + j] = value
+                adjacency_matrix[number_of_hidden_units + j, i] = value
+
+        bias_terms = torch.zeros(total_units, device=self.h.device)
+        for i in range(number_of_hidden_units):
+            bias_terms[i] = 0.5 * self.h[i] + 0.25 * torch.sum(self.W[i, :])
+        for j in range(number_of_hidden_units):
+            bias_terms[number_of_hidden_units + j] = 0.5 * self.h[j] + 0.25 * torch.sum(self.W[:, j])
+
+        left_part = torch.cat([
+            adjacency_matrix,
+            bias_terms.unsqueeze(0)
+        ], dim=0)
+
+        right_part = torch.cat([
+            bias_terms.view(-1, 1),
+            torch.zeros(1, 1, device=self.h.device)
+        ], dim=0)
+        # 水平拼接左右部分并取负
+        ising_matrix = -torch.cat([left_part, right_part], dim=1)  # 最终形状 (d+1, d+1)
+        return ising_matrix.cpu().detach().numpy()
+
+    def adjust_precision(self, ising_matrix, method='scale'):
+        if method == 'scale':
+            return np.round(ising_matrix * 100, 2)
+        elif method == 'adjust':
+            return kw.cim.adjust_ising_matrix_precision(ising_matrix, bit_width=14)
+        elif method == 'truncate':
+            # 2可以控制在30精度
+            return np.round(ising_matrix, 2)
+        else:
+            print("no adjust!")
+            return ising_matrix
 
     def gibbs_sampling(self, num_samples, steps=10):
         z = torch.randint(0, 2, (num_samples, self.latent_dim), dtype=torch.float).to(self.h.device)
@@ -133,56 +183,27 @@ class RBM(nn.Module):
                                                                              chain_state) + 0.40 * neighbor_strength * bias_terms + noise
         return torch.clamp(out, min=-0.4, max=0.4)
 
-    def ising_sampling_fsa(self, number_of_samples, number_of_hidden_units):
-        import kaiwu as kw
-        total_units = number_of_hidden_units + number_of_hidden_units
-        adjacency_matrix = torch.zeros((total_units, total_units), device=self.h.device)
-        for i in range(number_of_hidden_units):
-            for j in range(number_of_hidden_units):
-                value = 0.25 * self.W[i, j]
-                adjacency_matrix[i, number_of_hidden_units + j] = value
-                adjacency_matrix[number_of_hidden_units + j, i] = value
-
-        bias_terms = torch.zeros(total_units, device=self.h.device)
-        for i in range(number_of_hidden_units):
-            bias_terms[i] = 0.5 * self.h[i] + 0.25 * torch.sum(self.W[i, :])
-        for j in range(number_of_hidden_units):
-            bias_terms[number_of_hidden_units + j] = 0.5 * self.h[j] + 0.25 * torch.sum(self.W[:, j])
-
+    def ising_sampling_sa(self, number_of_samples, number_of_hidden_units):
         # FsatSA
-        worker = kw.classical.FastSimulatedAnnealingOptimizer(initial_temperature=1000,
-                                                              alpha=0.9,
-                                                              cutoff_temperature=0.001,
-                                                              iterations_per_t=number_of_samples,
-                                                              size_limit=number_of_samples,
-                                                              rand_seed=512,
-                                                              )
-        left_part = torch.cat([
-            adjacency_matrix,
-            bias_terms.unsqueeze(0)
-        ], dim=0)
-
-        right_part = torch.cat([
-            bias_terms.view(-1, 1),
-            torch.zeros(1, 1, device=self.h.device)
-        ], dim=0)
-        # 水平拼接左右部分并取负
-        ising_matrix = -torch.cat([left_part, right_part], dim=1)  # 最终形状 (d+1, d+1)
-
-        output = worker.solve(ising_matrix.cpu().detach().numpy())
+        self.worker.size_limit = number_of_samples
+        ising_matrix = self._create_ising_matrix(number_of_hidden_units)
+        # 调整精度
+        ising_matrix = self.adjust_precision(ising_matrix, method="adjust")
+        self.ising_matrix = ising_matrix
+        output = self.worker.solve(ising_matrix)
         result = [sample[:-1] * sample[-1] for sample in output]
         result = kw.sampler.spin_to_binary(np.array(result))
         return torch.tensor(result[:, :number_of_hidden_units], device=self.h.device, dtype=torch.float32)
 
-    def compute_gradients(self, positive_latent_variable, number_of_negative_samples=64, use_ising_sampling=False):
+    def compute_gradients(self, positive_latent_variable, number_of_negative_samples=64):
         positive_latent_variable = positive_latent_variable.float()
         positive_hidden_gradient = positive_latent_variable.mean(dim=0)
         positive_weight_gradient = torch.einsum('bi,bj->ij', positive_latent_variable,
                                                 positive_latent_variable) / positive_latent_variable.size(0)
         if self.sample_method == "ising_noise":
             negative_latent_variable = self.ising_sampling_noise(number_of_negative_samples, self.latent_dim)
-        elif self.sample_method == "ising_fsa":
-            negative_latent_variable = self.ising_sampling_fsa(number_of_negative_samples, self.latent_dim)
+        elif self.sample_method == "ising_sa":
+            negative_latent_variable = self.ising_sampling_sa(number_of_negative_samples, self.latent_dim)
         elif self.sample_method == "gibbs":
             negative_latent_variable = self.gibbs_sampling(number_of_negative_samples)
         else:
@@ -282,7 +303,12 @@ class DVAE_RBM(nn.Module):
         log_q = z * torch.log(q) + (1 - z) * torch.log(1 - q)
         entropy = -log_q.sum(dim=-1)
         energy_pos = self.rbm.energy(z)
-        z_negative = self.rbm.gibbs_sampling(z.size(0))
+        if self.sample_method == "gibbs:":
+            z_negative = self.rbm.gibbs_sampling(z.size(0))
+        elif self.sample_method == "ising_noise":
+            z_negative = self.rbm.ising_sampling_noise(z.size(0), self.latent_dim)
+        elif self.sample_method == "ising_sa":
+            z_negative = self.rbm.ising_sampling_sa(z.size(0), self.latent_dim)
         energy_neg = self.rbm.energy(z_negative)
         logZ = energy_neg.mean()
         kl = (energy_pos - entropy + logZ).mean()
@@ -386,15 +412,19 @@ class DVAE_RBM(nn.Module):
 
         # 初始化存储中间结果的变量
         intermediate_results = {
-            'rbm_params': [],
+            # 'rbm_params': [],
             'all_train_elbo': [],
-            'all_val_elbo': []
+            'all_val_elbo': [],
+            # 'ising_matrix': [],
+            # 'precision': [],
+            'time': []
         } if verbose == 1 else None
 
         for epoch in epoch_pbar:
             self.train()
             total_elbo, total_recon, total_kl = 0, 0, 0
             for x, batch_idx in train_dataloader:
+                strat_time = time.time()
                 x = x.to(self.device)
                 optimizer.zero_grad()
                 rbm_optimizer.zero_grad()
@@ -403,13 +433,20 @@ class DVAE_RBM(nn.Module):
                 loss = -elbo
                 loss.backward()
 
-                if verbose == 1:
-                    with torch.no_grad():
-                        current_W = self.rbm.W.detach().clone().cpu().numpy()
-                        current_h = self.rbm.h.detach().clone().cpu().numpy()
-                        intermediate_results['rbm_params'].append({'W': current_W, 'h': current_h})
-
+                # if verbose == 1:
+                # with torch.no_grad():
+                # current_W = self.rbm.W.detach().clone().cpu().numpy()
+                # current_h = self.rbm.h.detach().clone().cpu().numpy()
+                # intermediate_results['rbm_params'].append({'W': current_W, 'h': current_h})
+                # ising_matrix = self.rbm.ising_matrix.clone().cpu().numpy()
+                # ising_matrix = self.rbm.ising_matrix
+                # intermediate_results['ising_matrix'].append(ising_matrix)
+                # print(intermediate_results['ising_matrix'])
+                # precision = kw.cim.calculate_ising_matrix_bit_width(ising_matrix, bit_width=30)
+                # intermediate_results['precision'].append(precision)
+                # print(precision)
                 rbm_grads = self.rbm.compute_gradients(z.detach())
+
                 with torch.no_grad():
                     # 注意：这里直接赋值梯度
                     self.rbm.h.grad = rbm_grads['hidden_biases']
@@ -421,6 +458,9 @@ class DVAE_RBM(nn.Module):
                 total_elbo += elbo.item()
                 total_recon += recon_loss.item()
                 total_kl += kl_loss.item()
+
+                if verbose == 1:
+                    intermediate_results['time'].append(time.time() - strat_time)
 
             avg_elbo = total_elbo / len(train_dataloader)
             avg_recon = total_recon / len(train_dataloader)

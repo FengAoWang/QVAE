@@ -24,7 +24,7 @@ def set_seed(seed):
 
 def set_grid_configs():
     grid_configs = []
-    for sample_method in ["gibbs", "ising_noise", "ising_fsa"]:
+    for sample_method in ["ising_sa"]:
         for norm_method in ["batch"]:
             for latent_dim in [16, 32, 64, 128, 256]:
                 config = GridSearchConfig(normalization_method=norm_method,
