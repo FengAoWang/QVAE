@@ -50,29 +50,43 @@ class scDataset(Dataset):
 
 
 class Encoder(nn.Module):
-    def __init__(self, input_dim, hidden_dim, latent_dim):
+    def __init__(self,
+                 input_dim,
+                 hidden_dim,
+                 latent_dim,
+                 normalization='batchnorm'):
         super(Encoder, self).__init__()
         self.fc1 = nn.Linear(input_dim, hidden_dim)
-        self.bn1 = nn.BatchNorm1d(hidden_dim)
+        if normalization == 'batchnorm':
+            self.norm1 = nn.BatchNorm1d(hidden_dim)
+        elif normalization == 'layernorm':
+            self.norm1 = nn.LayerNorm(hidden_dim)
         self.dropout = nn.Dropout(0.1)
         self.fc2 = nn.Linear(hidden_dim, latent_dim)
 
     def forward(self, x):
-        h = F.relu(self.bn1(self.fc1(x)))
+        h = F.relu(self.norm1(self.fc1(x)))
         q_logits = self.fc2(h)
         return q_logits
 
 
 class Decoder(nn.Module):
-    def __init__(self, latent_dim, hidden_dim, output_dim):
+    def __init__(self,
+                 latent_dim,
+                 hidden_dim,
+                 output_dim,
+                 normalization='batchnorm'):
         super(Decoder, self).__init__()
         self.fc1 = nn.Linear(latent_dim, hidden_dim)
-        self.bn1 = nn.BatchNorm1d(hidden_dim)
+        if normalization == 'batchnorm':
+            self.norm1 = nn.BatchNorm1d(hidden_dim)
+        elif normalization == 'layernorm':
+            self.norm1 = nn.LayerNorm(hidden_dim)
         self.dropout = nn.Dropout(0.1)
         self.fc2 = nn.Linear(hidden_dim, output_dim)
 
     def forward(self, zeta):
-        h = F.relu(self.bn1(self.fc1(zeta)))
+        h = F.relu(self.norm1(self.fc1(zeta)))
         x_recon = self.fc2(h)
         return x_recon
 
@@ -121,19 +135,19 @@ class DVAE_RBM(nn.Module):
     def __init__(self,
                  hidden_dim=512,
                  latent_dim=256,
+                 batch_dim=16,
                  beta=0.5,
                  beta_kl=0.0001,
-                 use_batch_norm=True,
-                 use_layer_norm=True,
+                 use_norm='batchnorm',
                  device=torch.device('cpu')):
         super(DVAE_RBM, self).__init__()
         self.hidden_dim = hidden_dim
         self.latent_dim = latent_dim
+        self.batch_dim = batch_dim
         self.beta = beta
         self.beta_kl = beta_kl
         self.device = device
-        self.use_batch_norm = use_batch_norm
-        self.use_layer_norm = use_layer_norm
+        self.use_norm = use_norm
 
         # Initialize attributes to None; will be set in set_adata
         self.input_dim = None
@@ -141,6 +155,7 @@ class DVAE_RBM(nn.Module):
         self.encoder = None
         self.decoder = None
         self.rbm = None
+        self.batch_encoder=None
 
         # Store AnnData and batch information
         self.adata = None
@@ -179,14 +194,19 @@ class DVAE_RBM(nn.Module):
             self.input_dim,
             self.hidden_dim,
             self.latent_dim,
+            normalization=self.use_norm
         ).to(self.device)
 
         self.decoder = Decoder(
             self.latent_dim + self.n_batches,
             self.hidden_dim,
             self.input_dim,
+            normalization=self.use_norm
         ).to(self.device)
         self.rbm = RBM(self.latent_dim).to(self.device)
+        self.batch_encoder = nn.Sequential(
+            nn.Linear(self.n_batches, self.batch_dim),
+        ).to(self.device)
 
         print(f"Set AnnData with input_dim={self.input_dim}, {self.n_batches} batches")
 
@@ -235,9 +255,6 @@ class DVAE_RBM(nn.Module):
         energy_neg = self.rbm.energy(z_negative)
         # 用负相能量的均值作为 logZ 的近似
         logZ = energy_neg.mean()
-        # print(energy_pos)
-        # print(entropy)
-        # print(logZ)
         kl = (energy_pos - entropy + logZ).mean()
         return kl
 
@@ -247,7 +264,7 @@ class DVAE_RBM(nn.Module):
         q_logits = self.encoder(x)
         rho = Uniform(0, 1).sample(q_logits.shape).to(x.device)
         zeta, z, q = self.reparameterize(q_logits, rho)
-
+        batch_emb = self.batch_encoder(batch_one_hot)
         decoder_input = torch.cat([zeta, batch_one_hot], dim=-1)
         x_recon = self.decoder(decoder_input)
         recon_loss = F.mse_loss(x_recon, x, reduction='sum') / x.size(0)
@@ -292,6 +309,7 @@ class DVAE_RBM(nn.Module):
             epochs=100,
             beta=0.5,
             lr=1e-4,
+            weight_decay=1e-5,
             rbm_lr=1e-3,
             early_stopping=True,
             early_stopping_patience=10,
@@ -331,7 +349,7 @@ class DVAE_RBM(nn.Module):
 
 
         optimizer = torch.optim.Adam(
-            list(self.encoder.parameters()) + list(self.decoder.parameters()), lr=lr
+            list(self.encoder.parameters()) + list(self.decoder.parameters()), lr=lr, weight_decay=weight_decay
         )
         rbm_optimizer = torch.optim.Adam(self.rbm.parameters(), lr=rbm_lr)
 
@@ -443,16 +461,16 @@ class VAE(nn.Module):
     def __init__(self,
                  hidden_dim=512,
                  latent_dim=256,
+                 batch_dim=16,
                  beta_kl=0.0001,
-                 use_batch_norm=True,
-                 use_layer_norm=True,
+                 use_norm='batchnorm',
                  device=torch.device('cpu')):
         super(VAE, self).__init__()
         self.hidden_dim = hidden_dim
         self.latent_dim = latent_dim
+        self.batch_dim = batch_dim
         self.beta_kl = beta_kl
-        self.use_batch_norm = use_batch_norm
-        self.use_layer_norm = use_layer_norm
+        self.use_norm = use_norm
         self.device = device
 
         # Initialize attributes to None; set in set_adata
@@ -460,6 +478,7 @@ class VAE(nn.Module):
         self.n_batches = None
         self.encoder = None
         self.decoder = None
+        self.batch_encoder = None
 
         # Store AnnData and batch information
         self.adata = None
@@ -501,9 +520,13 @@ class VAE(nn.Module):
         ).to(self.device)
 
         self.decoder = Decoder(
-            self.latent_dim + self.n_batches,
+            self.latent_dim + self.batch_dim,
             self.hidden_dim,
             self.input_dim,
+        ).to(self.device)
+
+        self.batch_encoder = nn.Sequential(
+            nn.Linear(self.n_batches, self.batch_dim),
         ).to(self.device)
 
         print(f"Set AnnData with input_dim={self.input_dim}, {self.n_batches} batches")
@@ -537,7 +560,8 @@ class VAE(nn.Module):
         mu, logvar = self.encoder(x)
         z = self.reparameterize(mu, logvar)
 
-        decoder_input = torch.cat([z, batch_one_hot], dim=-1)
+        batch_emb = self.batch_encoder(batch_one_hot)
+        decoder_input = torch.cat([z, batch_emb], dim=-1)
         x_recon = self.decoder(decoder_input)
 
         recon_loss = F.mse_loss(x_recon, x, reduction='sum') / x.size(0)
@@ -552,6 +576,7 @@ class VAE(nn.Module):
             batch_size=128,
             epochs=100,
             lr=1e-3,
+            weight_decay=1e-5,
             early_stopping=True,
             early_stopping_patience=10,
             n_epochs_kl_warmup=None):
@@ -581,7 +606,7 @@ class VAE(nn.Module):
         train_dataset = scDataset(adata_train_array, train_batch_indices)
         train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=4)
 
-        optimizer = torch.optim.Adam(self.parameters(), lr=lr)
+        optimizer = torch.optim.Adam(self.parameters(), lr=lr, weight_decay=weight_decay)
 
         # Early stopping variables
         best_val_elbo = float('-inf')

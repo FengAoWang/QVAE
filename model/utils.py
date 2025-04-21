@@ -7,6 +7,8 @@ import logging
 import matplotlib.pyplot as plt
 import torch
 import scanpy as sc
+from scipy.stats import entropy
+from scib_metrics.benchmark import Benchmarker, BioConservation, BatchCorrection
 
 
 def split_data(dataset, adata):
@@ -96,6 +98,34 @@ def compute_clusters_performance(adata,
     return ARI, AMI, NMI, HOM, FMI
 
 
+def compute_batchEffect(adata,
+                        batch_key='batch',
+                        label_key='cell_type',
+                        x_emb='reps'):
+    bm = Benchmarker(
+        adata,
+        batch_key=batch_key,
+        label_key=label_key,
+        embedding_obsm_keys=[x_emb],
+        batch_correction_metrics=BatchCorrection(),
+        n_jobs=6,
+    )
+
+    bm.benchmark()
+    df = bm.get_results(min_max_scale=False)
+    print(df.columns)
+
+    # 筛选批次矫正相关的指标
+
+    # ['Isolated labels', 'KMeans NMI', 'KMeans ARI', 'Silhouette label',
+    #        'cLISI', 'Silhouette batch', 'iLISI', 'KBET', 'Graph connectivity',
+    #        'PCR comparison', 'Batch correction', 'Bio conservation', 'Total']
+    # 只取出 'reps' 对应的行
+    reps_metrics = df.loc[x_emb]
+    print(reps_metrics.values)
+    return reps_metrics.values
+
+
 def multiprocessing_train_fold(folds, worker_function, func_args_list, train_function):
     processes = []
     return_queue = mp.Queue()
@@ -129,7 +159,8 @@ def worker_function(func_args, return_queue, train_function):
         return_queue.put((fold_id, None))
 
 
-def train_fold(Model, adata, dataset_name, fold_id, params, device_id=6):
+
+def train_fold(Model, adata, dataset_name, fold_id, DataParams, TrainingParams, device_id=6):
     output_dir = f'result/{dataset_name}/'
     os.makedirs(output_dir, exist_ok=True)
 
@@ -143,29 +174,45 @@ def train_fold(Model, adata, dataset_name, fold_id, params, device_id=6):
 
     print(f"Data shape: {gex_adata_train.X.shape}")
 
-    model = Model(latent_dim=256, device=device)
-    model.set_adata(gex_adata_train, batch_key=params['batch_key'])
+    model = Model(latent_dim=TrainingParams['latent_dim'],
+                  device=device,
+                  use_norm=TrainingParams['normaliztion'])
+    model.set_adata(gex_adata_train, batch_key=DataParams['batch_key'])
 
-    model.fit(gex_adata_train, epochs=150, lr=1e-3, early_stopping_patience=10, n_epochs_kl_warmup=50)
+    model.fit(gex_adata_train,
+              epochs=150,
+              lr=TrainingParams['lr'],
+              early_stopping_patience=10,
+              n_epochs_kl_warmup=50,
+              batch_size=TrainingParams['batch_size'],
+              )
 
     # Add latent representations to AnnData
-    gex_adata_test.obsm['qvae_reps'] = model.get_representation(gex_adata_test)
-    latent_test = gex_adata_test.obsm['qvae_reps']
+    gex_adata_test.obsm['reps'] = model.get_representation(gex_adata_test)
+    latent_test = gex_adata_test.obsm['reps']
 
     # UMAP and clustering
-    sc.pp.neighbors(gex_adata_test, n_neighbors=10, use_rep='qvae_reps')
+    sc.pp.neighbors(gex_adata_test, n_neighbors=10, use_rep='reps')
     sc.tl.umap(gex_adata_test)
     # plt.figure(figsize=(8, 3))
-    sc.pl.umap(gex_adata_test, color=[params['labels_key'], params['batch_key']], show=False)
-    plt.savefig(f'{output_dir}{dataset_name}_{Model.__name__}_cell_{fold_id}.png', dpi=1000, bbox_inches='tight')
+    sc.pl.umap(gex_adata_test, color=[DataParams['labels_key'], DataParams['batch_key']], show=False)
+    plt.savefig(f'{output_dir}{dataset_name}_{Model.__name__}_cell_latentDim{TrainingParams["latent_dim"]}_fold{fold_id}.png', dpi=1000, bbox_inches='tight')
 
-    sc.pp.neighbors(gex_adata_test, n_neighbors=10, use_rep='qvae_reps', random_state=42)
+    sc.pp.neighbors(gex_adata_test, n_neighbors=10, use_rep='reps', random_state=42)
     sc.tl.leiden(gex_adata_test, random_state=42)
+    sc.tl.louvain(gex_adata_test, random_state=42)
 
     # Clustering metrics
-    if params['labels_key'] in gex_adata_test.obs:
-        ARI, AMI, NMI, HOM, FMI = compute_clusters_performance(gex_adata_test, params['labels_key'])
-        print(f'ARI: {ARI:.4f}, AMI: {AMI:.4f}, NMI: {NMI:.4f}, HOM: {HOM:.4f}, FMI: {FMI:.4f}')
-        return [ARI, AMI, NMI, HOM, FMI]
+    if DataParams['labels_key'] in gex_adata_test.obs:
+        leiden_ARI, leiden_AMI, leiden_NMI, leiden_HOM, leiden_FMI = compute_clusters_performance(gex_adata_test, DataParams['labels_key'])
+        louvain_ARI, louvain_AMI, louvain_NMI, louvain_HOM, louvain_FMI = compute_clusters_performance(gex_adata_test, DataParams['labels_key'], cluster_key='louvain')
+
+        # scib_values = compute_batchEffect(gex_adata_test, DataParams['batch_key'], DataParams['labels_key'],
+        #                                   x_emb='reps')
+        clustering_value = [leiden_ARI, leiden_AMI, leiden_NMI, leiden_HOM, leiden_FMI, louvain_ARI, louvain_AMI, louvain_NMI, louvain_HOM, louvain_FMI]
+
+        # clustering_value.extend(scib_values)
+        return clustering_value
+
     else:
         print("Warning: 'cell_type' not found in gex_data.obs. Skipping clustering metrics.")

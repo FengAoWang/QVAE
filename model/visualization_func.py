@@ -176,7 +176,7 @@ plt.rcParams.update({
 #
 #     return fig
 
-def visualize_folds(performance_df_list, vis_cols, methods_list, datasetName):
+def visualize_folds(performance_df_list, vis_cols, methods_list, datasetName, filename):
     """
     Visualize the performance of different methods across folds using bar plots with error bars in a single figure with vertical lines separating methods.
 
@@ -195,13 +195,13 @@ def visualize_folds(performance_df_list, vis_cols, methods_list, datasetName):
                 raise ValueError(f"Column '{col}' not found in one of the DataFrames.")
 
     # 创建单个图形
-    fig, ax = plt.subplots(figsize=(len(vis_cols) * len(methods_list) * 0.3, 3))
+    fig, ax = plt.subplots(figsize=(len(vis_cols) * len(methods_list) * 0.15, 2))
 
     # 计算每个箱线图的宽度和位置
     n_methods = len(methods_list)
     bar_width = 0.9 / n_methods  # 每个方法的柱状图宽度
     group_width = n_methods * bar_width
-    metric_positions = np.arange(len(vis_cols)) * (group_width + 0.5)  # 每组的起始位置
+    metric_positions = np.arange(len(vis_cols)) * (group_width + 0.2)  # 每组的起始位置
 
     # 绘制柱状图
     for i, metric in enumerate(vis_cols):
@@ -218,10 +218,10 @@ def visualize_folds(performance_df_list, vis_cols, methods_list, datasetName):
                 mean_value,
                 yerr=std_value,  # 添加误差棒（标准差）
                 width=bar_width * 0.9,
-                color=sns.color_palette("Set2")[j],
+                color=sns.color_palette("Paired")[j],
                 edgecolor='black',
                 linewidth=0.3,  # 设置描边宽度（可调整）
-                error_kw=dict(lw=0.3, capsize=1.5, capthick=0.3),  # 误差棒设置
+                error_kw=dict(lw=0.3, capsize=1, capthick=0.3),  # 误差棒设置
                 label=method if i == 0 else None  # 仅为第一个指标添加图例
             )
             # # 在方法之间添加分隔线
@@ -246,15 +246,148 @@ def visualize_folds(performance_df_list, vis_cols, methods_list, datasetName):
 
     os.makedirs('figures/clustering_performance/', exist_ok=True)
     # 保存图形
-    plt.savefig(f'figures/clustering_performance/{datasetName}_5_folds_klwarm_v3.png', dpi=1000, bbox_inches='tight')
+    plt.savefig(f'figures/clustering_performance/{datasetName}_{filename}.pdf', dpi=1000, bbox_inches='tight')
 
     return fig
 
 
-if __name__ == '__main__':
-    dataset_name = 'HLCA_core'
-    RBM_VAE_df = pd.read_csv(f'result/{dataset_name}/RBM_VAE_{dataset_name}_clustering.csv')
-    # VAE_df = pd.read_csv(f'result/{dataset_name}/VAE_{dataset_name}_clustering.csv')
-    SCVI_df = pd.read_csv(f'result/{dataset_name}/SCVI_{dataset_name}_clustering.csv')
 
-    visualize_folds([RBM_VAE_df,  SCVI_df], ['ARI', 'AMI', 'NMI', 'HOM', 'FMI'], ['RBM_VAE', 'SCVI'], dataset_name)
+def visualize_latentDims(df_list, vis_cols, latent_dims, datasetName, methodsList, x_dim_name, figure_name):
+    if len(methodsList) == 1:
+        figure_name = figure_name + methodsList[0]
+    if len(methodsList) > 1:
+        figure_name = figure_name + 'comparison'
+
+    if len(vis_cols) == 1:
+        figure_name = figure_name + vis_cols[0]
+
+    # Set up the plot
+    plt.figure(figsize=(2, 1.5))  # Slightly larger for clarity with multiple methods
+
+    # Generate unique colors for each method-metric combination
+    total_combinations = len(methodsList) * len(vis_cols)
+    colors = sns.color_palette("husl", total_combinations)
+
+    # Initialize color index
+    color_idx = 0
+
+    # Process each method's dataframe list
+    for method_idx, (method, dfs) in enumerate(zip(methodsList, df_list)):
+        # Add latent_dim column to each dataframe
+        for i, df in enumerate(dfs):
+            df[x_dim_name] = latent_dims[i]
+
+        # Combine dataframes for this method
+        combined_df = pd.concat(dfs)
+
+        # Calculate mean and std for each metric
+        summary_df = combined_df.groupby(x_dim_name)[vis_cols].agg(['mean', 'std']).reset_index()
+
+        # Plot lines for each metric for this method
+        for col in vis_cols:
+            # Plot mean line with unique color for method-metric pair
+            if len(methodsList) == 1:
+                plt.plot(summary_df[x_dim_name], summary_df[col]['mean'],
+                         marker='o', color=colors[color_idx],
+                         label=f'{col}')
+
+            if len(methodsList) > 1:
+                plt.plot(summary_df[x_dim_name], summary_df[col]['mean'],
+                         marker='o', color=colors[color_idx],
+                         label=f'{method} {col}')
+            # Plot error band with matching color
+            plt.fill_between(summary_df[x_dim_name],
+                             summary_df[col]['mean'] - summary_df[col]['std'],
+                             summary_df[col]['mean'] + summary_df[col]['std'],
+                             color=colors[color_idx], alpha=0.1)
+            color_idx += 1  # Move to next color for next method-metric pair
+
+    # Customize plot
+    plt.xlabel(x_dim_name)
+    plt.ylabel('Value')
+    plt.title(f'{dataset_name}')
+    plt.xticks(latent_dims, latent_dims, rotation=40)  # Uniform x-ticks
+    plt.ylim([0, 1])
+    plt.legend()
+    plt.savefig(f'figures/clustering_latent/{datasetName}_{x_dim_name}_{figure_name}.pdf', dpi=1000, bbox_inches='tight')
+
+
+
+if __name__ == '__main__':
+
+    #   benchmark
+    # dataset_name = 'BMMC_multiome'
+    # RBM_VAE_df = pd.read_csv(f'result/{dataset_name}/RBM_VAE_{dataset_name}_clustering_latentDim256_layernorm_batchSize2048_weight_decay.csv')
+    # VAE_df = pd.read_csv(f'result/{dataset_name}/VAE_{dataset_name}_clustering_latentDim128_weight_decay.csv')
+    # SCVI_df = pd.read_csv(f'result/{dataset_name}/SCVI_{dataset_name}_clustering.csv')
+    # tr_VAE_df = pd.read_csv(f'result/{dataset_name}/trVAE_{dataset_name}_clustering.csv')
+    # LDVAE_df = pd.read_csv(f'result/{dataset_name}/LDVAE_{dataset_name}_clustering.csv')
+    # AUTOZI_df = pd.read_csv(f'result/{dataset_name}/AUTOZI_{dataset_name}_clustering.csv')
+    #
+    #
+    # # visualize_folds([RBM_VAE_df,  RBM_VAE_df2, RBM_VAE_df3, SCVI_df], ['ARI', 'AMI', 'NMI', 'HOM', 'FMI'], ['RBM_VAE', 'RBM_VAE_wd_layer_bs2048', 'RBM_VAE_wd', 'SCVI'], dataset_name, 'bio_conservation')
+    #
+    # visualize_folds([RBM_VAE_df,  SCVI_df, tr_VAE_df, LDVAE_df, AUTOZI_df, VAE_df],
+    #                 ['leiden_ARI', 'leiden_AMI', 'leiden_NMI', 'leiden_FMI'],
+    #                 ['RBM_VAE', 'SCVI', 'trVAE', 'LDVAE', 'AUTOZI', 'VAE'],
+    #                 dataset_name,
+    #                 'bio_conservation_bm')
+    # visualize_folds([RBM_VAE_df,  SCVI_df, tr_VAE_df, LDVAE_df, AUTOZI_df, VAE_df],
+    #                 ['iLISI', 'KBET', 'Graph connectivity', 'Batch correction'],
+    #                 ['RBM_VAE', 'SCVI', 'trVAE', 'LDVAE', 'AUTOZI', 'VAE'],
+    #                 dataset_name,
+    #                 'batch_remove_bm')
+
+    #
+    # RBM_df_list = []
+    # VAE_df_list = []
+    # latent_dims = [16, 32, 64, 128, 256, 512]
+    # methods = ['RBM-VAE']
+    #
+    # dataset_name = 'HLCA_core'
+    # for latent_dim in latent_dims:
+    #     RBM_df_list.append(pd.read_csv(f'result/{dataset_name}/RBM_VAE_{dataset_name}_clustering_latentDim{latent_dim}.csv'))
+    # # for latent_dim in latent_dims:
+    # #     VAE_df_list.append(pd.read_csv(f'result/{dataset_name}/VAE_{dataset_name}_clustering_latentDim{latent_dim}.csv'))
+    # df_list = [RBM_df_list]
+    #
+    # visualize_latentDims(df_list, ['ARI', 'AMI', 'NMI', 'HOM', 'FMI'], latent_dims, dataset_name, methods)
+
+    # RBM_df_list = []
+    # VAE_df_list = []
+    # latent_dims = [16, 32, 64, 128, 256, 512]
+    # methods = ['RBM-VAE']
+    #
+    # dataset_name = 'pancreas'
+    # for latent_dim in latent_dims:
+    #     RBM_df_list.append(pd.read_csv(f'result/{dataset_name}/RBM_VAE_pancreas_clustering_latentDim256_layernorm_batchSize{}_weight_decay.csv'))
+    #
+    # # for latent_dim in latent_dims:
+    # #     VAE_df_list.append(pd.read_csv(f'result/{dataset_name}/VAE_{dataset_name}_clustering_latentDim{latent_dim}_weight_decay.csv'))
+    #
+    # # for latent_dim in latent_dims:
+    # #     RBM_df_list2.append(pd.read_csv(f'result/{dataset_name}/RBM_VAE_{dataset_name}_clustering_latentDim{latent_dim}_weight_decay.csv'))
+    # df_list = [RBM_df_list]
+    #
+    # for col in ['ARI', 'AMI', 'NMI', 'HOM', 'FMI']:
+    #     visualize_latentDims(df_list, [col], latent_dims, dataset_name, methods)
+
+
+    RBM_df_list = []
+    VAE_df_list = []
+    batch_dims = [128, 256, 512, 1024, 2048]
+    methods = ['RBM-VAE']
+
+    dataset_name = 'immune'
+    for batch_dim in batch_dims:
+        RBM_df_list.append(pd.read_csv(f'result/{dataset_name}/RBM_VAE_{dataset_name}_clustering_latentDim256_layernorm_batchSize{batch_dim}_weight_decay.csv'))
+
+    # for latent_dim in latent_dims:
+    #     VAE_df_list.append(pd.read_csv(f'result/{dataset_name}/VAE_{dataset_name}_clustering_latentDim{latent_dim}_weight_decay.csv'))
+
+    # for latent_dim in latent_dims:
+    #     RBM_df_list2.append(pd.read_csv(f'result/{dataset_name}/RBM_VAE_{dataset_name}_clustering_latentDim{latent_dim}_weight_decay.csv'))
+    df_list = [RBM_df_list]
+
+    # for col in ['leiden_ARI', 'leiden_AMI', 'leiden_NMI', 'leiden_FMI']:
+    visualize_latentDims(df_list, ['leiden_ARI', 'leiden_AMI', 'leiden_NMI', 'leiden_FMI'], batch_dims, dataset_name, methods, 'batch size', 'layernorm')
