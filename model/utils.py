@@ -15,14 +15,11 @@ def split_data(dataset, adata):
     # 设置5折交叉验证
     n_splits = 5
     kf = KFold(n_splits=n_splits, shuffle=True, random_state=42)
-
     # 创建保存目录
     output_dir = f'split_indices/{dataset}/'
     os.makedirs(output_dir, exist_ok=True)
-
     # 获取样本数量
     n_samples = adata.X.shape[0]
-
     # 初始化字典来存储所有折的索引
     all_folds = {
         'train': [],
@@ -89,7 +86,6 @@ def load_fold_indices(dataset, fold_num=None):
 def compute_clusters_performance(adata,
                                  cell_key,
                                  cluster_key='leiden'):
-
     ARI = metrics.adjusted_rand_score(adata.obs[cell_key], adata.obs[cluster_key])
     AMI = metrics.adjusted_mutual_info_score(adata.obs[cell_key], adata.obs[cluster_key])
     NMI = metrics.normalized_mutual_info_score(adata.obs[cell_key], adata.obs[cluster_key])
@@ -108,6 +104,7 @@ def compute_batchEffect(adata,
         label_key=label_key,
         embedding_obsm_keys=[x_emb],
         batch_correction_metrics=BatchCorrection(),
+        bio_conservation_metrics=BioConservation(),
         n_jobs=6,
     )
 
@@ -159,7 +156,6 @@ def worker_function(func_args, return_queue, train_function):
         return_queue.put((fold_id, None))
 
 
-
 def train_fold(Model, adata, dataset_name, fold_id, DataParams, TrainingParams, device_id=6):
     output_dir = f'result/{dataset_name}/'
     os.makedirs(output_dir, exist_ok=True)
@@ -192,27 +188,32 @@ def train_fold(Model, adata, dataset_name, fold_id, DataParams, TrainingParams, 
     latent_test = gex_adata_test.obsm['reps']
 
     # UMAP and clustering
-    sc.pp.neighbors(gex_adata_test, n_neighbors=10, use_rep='reps')
-    sc.tl.umap(gex_adata_test)
-    # plt.figure(figsize=(8, 3))
-    sc.pl.umap(gex_adata_test, color=[DataParams['labels_key'], DataParams['batch_key']], show=False)
-    plt.savefig(f'{output_dir}{dataset_name}_{Model.__name__}_cell_latentDim{TrainingParams["latent_dim"]}_fold{fold_id}.png', dpi=1000, bbox_inches='tight')
-
-    sc.pp.neighbors(gex_adata_test, n_neighbors=10, use_rep='reps', random_state=42)
+    sc.pp.neighbors(gex_adata_test, use_rep='reps')
     sc.tl.leiden(gex_adata_test, random_state=42)
-    sc.tl.louvain(gex_adata_test, random_state=42)
+
+    sc.tl.umap(gex_adata_test)
+    sc.pl.umap(gex_adata_test,
+               color=[DataParams['labels_key'], DataParams['batch_key'], 'leiden'],
+               show=False,
+               frameon=False,
+               ncols=1, )
+    plt.savefig(
+        f'{output_dir}{dataset_name}_{Model.__name__}_cell_latentDim{TrainingParams["latent_dim"]}_fold{fold_id}.pdf',
+        dpi=1000, bbox_inches='tight')
+
+    # sc.tl.louvain(gex_adata_test, random_state=42)
 
     # Clustering metrics
     if DataParams['labels_key'] in gex_adata_test.obs:
-        leiden_ARI, leiden_AMI, leiden_NMI, leiden_HOM, leiden_FMI = compute_clusters_performance(gex_adata_test, DataParams['labels_key'])
-        louvain_ARI, louvain_AMI, louvain_NMI, louvain_HOM, louvain_FMI = compute_clusters_performance(gex_adata_test, DataParams['labels_key'], cluster_key='louvain')
+        leiden_ARI, leiden_AMI, leiden_NMI, leiden_HOM, leiden_FMI = compute_clusters_performance(gex_adata_test,
+                                                                                                  DataParams[
+                                                                                                      'labels_key'])
+        # louvain_ARI, louvain_AMI, louvain_NMI, louvain_HOM, louvain_FMI = compute_clusters_performance(gex_adata_test, DataParams['labels_key'], cluster_key='louvain')
 
-        # scib_values = compute_batchEffect(gex_adata_test, DataParams['batch_key'], DataParams['labels_key'],
-        #                                   x_emb='reps')
-        clustering_value = [leiden_ARI, leiden_AMI, leiden_NMI, leiden_HOM, leiden_FMI, louvain_ARI, louvain_AMI, louvain_NMI, louvain_HOM, louvain_FMI]
-
-        # clustering_value.extend(scib_values)
+        scib_values = compute_batchEffect(gex_adata_test, DataParams['batch_key'], DataParams['labels_key'],
+                                          x_emb='reps')
+        clustering_value = [leiden_ARI, leiden_AMI, leiden_NMI, leiden_HOM, leiden_FMI]
+        clustering_value.extend(scib_values)
         return clustering_value
-
     else:
         print("Warning: 'cell_type' not found in gex_data.obs. Skipping clustering metrics.")

@@ -7,6 +7,7 @@ from torch.utils.data import Dataset, DataLoader
 import numpy as np
 from sklearn.model_selection import train_test_split
 from tqdm import tqdm
+from typing import Callable, Literal
 
 
 class scDataset(Dataset):
@@ -52,42 +53,99 @@ class scDataset(Dataset):
 class Encoder(nn.Module):
     def __init__(self,
                  input_dim,
-                 hidden_dim,
+                 hidden_dims,
                  latent_dim,
                  normalization='batchnorm'):
         super(Encoder, self).__init__()
-        self.fc1 = nn.Linear(input_dim, hidden_dim)
-        if normalization == 'batchnorm':
-            self.norm1 = nn.BatchNorm1d(hidden_dim)
-        elif normalization == 'layernorm':
-            self.norm1 = nn.LayerNorm(hidden_dim)
+
+        # Create list to hold layers
+        self.layers = nn.ModuleList()
+        self.norm_layers = nn.ModuleList()
         self.dropout = nn.Dropout(0.1)
-        self.fc2 = nn.Linear(hidden_dim, latent_dim)
+
+        # Input dimension for first layer
+        current_dim = input_dim
+
+        # Create hidden layers based on hidden_dims list
+        for hidden_dim in hidden_dims:
+            # Add linear layer
+            self.layers.append(nn.Linear(current_dim, hidden_dim))
+
+            # Add normalization layer
+            if normalization == 'batchnorm':
+                self.norm_layers.append(nn.BatchNorm1d(hidden_dim))
+            elif normalization == 'layernorm':
+                self.norm_layers.append(nn.LayerNorm(hidden_dim))
+            else:
+                self.norm_layers.append(nn.Identity())  # No normalization
+
+            current_dim = hidden_dim
+
+        # Final layer to latent dimension
+        self.fc_final = nn.Linear(current_dim, latent_dim)
 
     def forward(self, x):
-        h = F.relu(self.norm1(self.fc1(x)))
-        q_logits = self.fc2(h)
+        h = x
+        # Process through hidden layers
+        for layer, norm in zip(self.layers, self.norm_layers):
+            h = layer(h)
+            h = norm(h)
+            h = F.leaky_relu(h)
+            h = self.dropout(h)
+
+        # Final layer
+        q_logits = self.fc_final(h)
         return q_logits
 
 
 class Decoder(nn.Module):
     def __init__(self,
                  latent_dim,
-                 hidden_dim,
+                 hidden_dims,
                  output_dim,
                  normalization='batchnorm'):
         super(Decoder, self).__init__()
-        self.fc1 = nn.Linear(latent_dim, hidden_dim)
-        if normalization == 'batchnorm':
-            self.norm1 = nn.BatchNorm1d(hidden_dim)
-        elif normalization == 'layernorm':
-            self.norm1 = nn.LayerNorm(hidden_dim)
+
+        # Reverse hidden_dims to ensure low-to-high dimension order
+        hidden_dims = hidden_dims[::-1]
+
+        # Create lists to hold layers
+        self.layers = nn.ModuleList()
+        self.norm_layers = nn.ModuleList()
         self.dropout = nn.Dropout(0.1)
-        self.fc2 = nn.Linear(hidden_dim, output_dim)
+
+        # Input dimension for first layer
+        current_dim = latent_dim
+
+        # Create hidden layers based on reversed hidden_dims list
+        for hidden_dim in hidden_dims:
+            # Add linear layer
+            self.layers.append(nn.Linear(current_dim, hidden_dim))
+
+            # Add normalization layer
+            if normalization == 'batchnorm':
+                self.norm_layers.append(nn.BatchNorm1d(hidden_dim))
+            elif normalization == 'layernorm':
+                self.norm_layers.append(nn.LayerNorm(hidden_dim))
+            else:
+                self.norm_layers.append(nn.Identity())  # No normalization
+
+            current_dim = hidden_dim
+
+        # Final layer to output dimension
+        self.fc_final = nn.Linear(current_dim, output_dim)
 
     def forward(self, zeta):
-        h = F.relu(self.norm1(self.fc1(zeta)))
-        x_recon = self.fc2(h)
+        h = zeta
+        # Process through hidden layers
+        for layer, norm in zip(self.layers, self.norm_layers):
+            h = layer(h)
+            h = norm(h)
+            h = F.leaky_relu(h)
+            h = self.dropout(h)
+
+        # Final layer
+        x_recon = self.fc_final(h)
         return x_recon
 
 
@@ -133,15 +191,19 @@ class RBM(nn.Module):
 
 class DVAE_RBM(nn.Module):
     def __init__(self,
-                 hidden_dim=512,
+                 hidden_dims=None,
                  latent_dim=256,
                  batch_dim=16,
                  beta=0.5,
                  beta_kl=0.0001,
                  use_norm='batchnorm',
-                 device=torch.device('cpu')):
+                 device=torch.device('cpu'),
+                 batch_representation: Literal["one-hot", "embedding"] = "one-hot",):
         super(DVAE_RBM, self).__init__()
-        self.hidden_dim = hidden_dim
+        if hidden_dims is None:
+            hidden_dims = [1024, 512]
+        self.decoder_input_dim = None
+        self.hidden_dims = hidden_dims
         self.latent_dim = latent_dim
         self.batch_dim = batch_dim
         self.beta = beta
@@ -163,6 +225,7 @@ class DVAE_RBM(nn.Module):
         self.batch_indices = None
 
         self.to(device)
+        self.batch_representation = batch_representation
 
     def set_adata(self,
                   adata: anndata.AnnData,
@@ -192,20 +255,23 @@ class DVAE_RBM(nn.Module):
         # Initialize encoder, decoder, and RBM
         self.encoder = Encoder(
             self.input_dim,
-            self.hidden_dim,
+            self.hidden_dims,
             self.latent_dim,
             normalization=self.use_norm
         ).to(self.device)
-
+        if self.batch_representation == 'one-hot':
+            self.decoder_input_dim = self.latent_dim + self.n_batches
+        elif self.batch_representation == 'embedding':
+            self.decoder_input_dim = self.latent_dim + self.batch_dim
         self.decoder = Decoder(
-            self.latent_dim + self.n_batches,
-            self.hidden_dim,
+            self.decoder_input_dim,
+            self.hidden_dims,
             self.input_dim,
             normalization=self.use_norm
         ).to(self.device)
         self.rbm = RBM(self.latent_dim).to(self.device)
         self.batch_encoder = nn.Sequential(
-            nn.Linear(self.n_batches, self.batch_dim),
+            nn.Embedding(self.n_batches, self.batch_dim),
         ).to(self.device)
 
         print(f"Set AnnData with input_dim={self.input_dim}, {self.n_batches} batches")
@@ -232,7 +298,7 @@ class DVAE_RBM(nn.Module):
         Returns:
             torch.Tensor: One-hot encoded batch tensor
         """
-        return F.one_hot(indices, num_classes=self.n_batches).float().to(self.device)
+        return F.one_hot(indices, num_classes=self.n_batches).long().to(self.device)
 
     # def kl_divergence(self, z, q):
     #     # 熵项 H(q_phi)
@@ -264,8 +330,12 @@ class DVAE_RBM(nn.Module):
         q_logits = self.encoder(x)
         rho = Uniform(0, 1).sample(q_logits.shape).to(x.device)
         zeta, z, q = self.reparameterize(q_logits, rho)
-        batch_emb = self.batch_encoder(batch_one_hot)
-        decoder_input = torch.cat([zeta, batch_one_hot], dim=-1)
+        batch_emb = self.batch_encoder(batch_indices)
+        if self.batch_representation == 'embedding':
+            decoder_input = torch.cat([zeta, batch_emb], dim=-1)
+        elif self.batch_representation == 'one-hot':
+            decoder_input = torch.cat([zeta, batch_one_hot], dim=-1)
+
         x_recon = self.decoder(decoder_input)
         recon_loss = F.mse_loss(x_recon, x, reduction='sum') / x.size(0)
         kl_loss = self.kl_divergence(z, q)
@@ -312,7 +382,7 @@ class DVAE_RBM(nn.Module):
             weight_decay=1e-5,
             rbm_lr=1e-3,
             early_stopping=True,
-            early_stopping_patience=10,
+            early_stopping_patience=20,
             n_epochs_kl_warmup=None):
 
         if adata is None and self.adata is None:
@@ -370,6 +440,7 @@ class DVAE_RBM(nn.Module):
             total_elbo, total_recon, total_kl = 0, 0, 0
             for x, batch_idx in train_dataloader:
                 x = x.to(self.device)
+                batch_idx = batch_idx.to(self.device)
                 optimizer.zero_grad()
                 rbm_optimizer.zero_grad()
 
@@ -406,6 +477,7 @@ class DVAE_RBM(nn.Module):
                 val_total_elbo, val_total_recon, val_total_kl = 0, 0, 0
                 for x, batch_idx in val_dataloader:
                     x = x.to(self.device)
+                    batch_idx = batch_idx.to(self.device)
                     with torch.no_grad():
                         elbo, recon_loss, kl_loss, z, zeta = self(x, batch_idx)
 
