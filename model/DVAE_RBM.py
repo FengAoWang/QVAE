@@ -8,6 +8,7 @@ import numpy as np
 from sklearn.model_selection import train_test_split
 from tqdm import tqdm
 from typing import Callable, Literal
+# from utils import LossFunction
 
 
 class scDataset(Dataset):
@@ -149,6 +150,151 @@ class Decoder(nn.Module):
         return x_recon
 
 
+class ZINBDecoder(nn.Module):
+    def __init__(self, input_dim, hidden_dims, output_dim, normalization='batchnorm'):
+        super().__init__()
+        self.layers = nn.ModuleList()
+        self.norm_layers = nn.ModuleList()
+        self.dropout = nn.Dropout(0.1)
+        current_dim = input_dim
+
+        for hidden_dim in hidden_dims:
+            self.layers.append(nn.Linear(current_dim, hidden_dim))
+            if normalization == 'batchnorm':
+                self.norm_layers.append(nn.BatchNorm1d(hidden_dim))
+            elif normalization == 'layernorm':
+                self.norm_layers.append(nn.LayerNorm(hidden_dim))
+            else:
+                self.norm_layers.append(nn.Identity())
+            current_dim = hidden_dim
+
+        self.fc_mu = nn.Linear(current_dim, output_dim)
+        self.fc_theta = nn.Linear(current_dim, output_dim)
+        self.fc_pi = nn.Linear(current_dim, output_dim)
+
+    def forward(self, h):
+        for layer, norm in zip(self.layers, self.norm_layers):
+            h = F.leaky_relu(norm(layer(h)))
+            h = self.dropout(h)
+
+        mu = torch.exp(self.fc_mu(h))
+        theta = torch.exp(self.fc_theta(h))
+        pi = torch.sigmoid(self.fc_pi(h))
+        return mu, theta, pi
+
+
+class LinearLayer(nn.Module):
+    def __init__(self,
+                 input_dim: int,
+                 output_dim: int,
+                 dropout: float = 0.2,
+                 batchnorm: bool = False,
+                 activation=None,
+                 ):
+        super(LinearLayer, self).__init__()
+        self.linear_layer = nn.Linear(input_dim, output_dim)
+
+        self.dropout = nn.Dropout(dropout) if dropout > 0 else None
+        self.batchnorm = nn.LayerNorm(output_dim) if batchnorm else None
+
+        self.activation = None
+        if activation is not None:
+            if activation == 'relu':
+                self.activation = F.relu
+            elif activation == 'sigmoid':
+                self.activation = torch.sigmoid
+            elif activation == 'tanh':
+                self.activation = torch.tanh
+            elif activation == 'leakyrelu':
+                self.activation = torch.nn.LeakyReLU()
+            elif activation == 'selu':
+                self.activation = torch.nn.SELU()
+
+    def forward(self, input_x):
+        x = self.linear_layer(input_x)
+
+        if self.batchnorm is not None:
+            x = self.batchnorm(x)
+        if self.activation is not None:
+            x = self.activation(x)
+        if self.dropout is not None:
+            x = self.dropout(x)
+        return x
+
+
+class FeatureEncoder(nn.Module):
+    def __init__(self,
+                 input_dim,
+                 hidden_dims,
+                 activation=None,
+                 dropout=0.2,
+                 batchnorm=True,
+                 input_dropout=0.4
+                 ):
+        super(FeatureEncoder, self).__init__()
+        self.layers = nn.ModuleList(
+            [LinearLayer(input_dim, hidden_dims[0], batchnorm=batchnorm, activation=activation, dropout=input_dropout)])
+
+        for i in range(len(hidden_dims) - 1):
+            self.layers.append(
+                LinearLayer(hidden_dims[i], hidden_dims[i + 1], batchnorm=batchnorm, activation=activation, dropout=dropout))
+
+    def forward(self, input_x):
+        for layer in self.layers:
+            input_x = layer(input_x)
+        return input_x
+
+
+class RNAVAEDecoder(nn.Module):
+    def __init__(self,
+                 latent_dim,
+                 hidden_dims,
+                 output_dim,
+                 dropout=0.1
+                 ):
+        super(RNAVAEDecoder, self).__init__()
+        hidden_dims = hidden_dims[::-1]
+        self.px_decoder = FeatureEncoder(latent_dim, hidden_dims, activation='leakyrelu', dropout=dropout)
+
+        self.rna_scale_decoder = nn.Sequential(
+            nn.Linear(hidden_dims[-1], output_dim),
+            nn.Softmax(dim=-1)
+        )
+
+        self.rna_rate_decoder = nn.Linear(hidden_dims[-1], output_dim)
+        self.rna_dropout_decoder = nn.Linear(hidden_dims[-1], output_dim)
+
+    def forward(self,
+                latent_z: torch.tensor):
+        px = self.px_decoder(latent_z)
+
+        px_rna_scale = self.rna_scale_decoder(px)
+        px_rna_dropout = self.rna_dropout_decoder(px)
+        px_rna_rate = self.rna_rate_decoder(px)
+
+        output = {
+            'px': px,
+            'px_rna_scale': px_rna_scale,
+            'px_rna_dropout': px_rna_dropout,
+            'px_rna_rate': px_rna_rate
+        }
+        return output
+
+
+def zinb_nll(x, mu, theta, pi, eps=1e-8):
+    softplus_pi = -F.softplus(-pi)
+    nb_case = (
+        torch.lgamma(theta + eps + x) - torch.lgamma(x + 1.0) - torch.lgamma(theta + eps)
+        + theta * (torch.log(theta + eps) - torch.log(theta + mu + eps))
+        + x * (torch.log(mu + eps) - torch.log(theta + mu + eps))
+    )
+    nb_case = nb_case + softplus_pi
+
+    zero_case = -F.softplus(-pi + theta * (torch.log(theta + eps) - torch.log(theta + mu + eps)))
+    res = torch.where(torch.lt(x, 1e-8), zero_case, nb_case)
+    return -res.sum(dim=-1).mean()
+
+
 class RBM(nn.Module):
     def __init__(self, latent_dim):
         super(RBM, self).__init__()
@@ -198,7 +344,8 @@ class DVAE_RBM(nn.Module):
                  beta_kl=0.0001,
                  use_norm='batchnorm',
                  device=torch.device('cpu'),
-                 batch_representation: Literal["one-hot", "embedding"] = "one-hot",):
+                 batch_representation: Literal["one-hot", "embedding"] = "one-hot",
+                 use_zinb_decoder: bool = False):
         super(DVAE_RBM, self).__init__()
         if hidden_dims is None:
             hidden_dims = [1024, 512]
@@ -210,6 +357,7 @@ class DVAE_RBM(nn.Module):
         self.beta_kl = beta_kl
         self.device = device
         self.use_norm = use_norm
+        self.use_zinb_decoder = use_zinb_decoder
 
         # Initialize attributes to None; will be set in set_adata
         self.input_dim = None
@@ -230,51 +378,65 @@ class DVAE_RBM(nn.Module):
     def set_adata(self,
                   adata: anndata.AnnData,
                   batch_key='batch'):
-        """
-        Store AnnData object, set input_dim, and initialize model components.
-
-        Args:
-            adata (anndata.AnnData): AnnData object containing data and batch annotations
-            batch_key (str): Key in adata.obs for batch information
-        """
         self.adata = adata.copy()
         self.batch_key = batch_key
-
-        # Set input_dim from adata
         self.input_dim = adata.X.shape[1]
 
-        # Extract batch indices
-        if batch_key not in adata.obs:
-            raise ValueError(f"Batch key '{batch_key}' not found in adata.obs")
+        # 检查是否使用 batch 信息
+        use_batch = False
+        if batch_key in adata.obs:
+            batch_series = adata.obs[batch_key].astype(str)
+            unique_batches = batch_series[batch_series != ""].unique()
+            if len(unique_batches) > 0:
+                use_batch = True
 
-        # Convert batch labels to categorical indices
-        batch_categories = adata.obs[batch_key].astype('category')
-        self.batch_indices = torch.tensor(batch_categories.cat.codes.values, dtype=torch.long)
-        self.n_batches = len(batch_categories.cat.categories)
+        self.use_batch = use_batch  # 新增标记
 
-        # Initialize encoder, decoder, and RBM
+        if use_batch:
+            batch_categories = batch_series.astype('category')
+            self.batch_indices = torch.tensor(batch_categories.cat.codes.values, dtype=torch.long)
+            self.n_batches = len(batch_categories.cat.categories)
+        else:
+            self.batch_indices = torch.zeros(adata.shape[0], dtype=torch.long)  # dummy batch
+            self.n_batches = 0
+
+        # 初始化 encoder, decoder, rbm
         self.encoder = Encoder(
             self.input_dim,
             self.hidden_dims,
             self.latent_dim,
             normalization=self.use_norm
         ).to(self.device)
-        if self.batch_representation == 'one-hot':
+
+        if self.batch_representation == 'one-hot' and use_batch:
             self.decoder_input_dim = self.latent_dim + self.n_batches
-        elif self.batch_representation == 'embedding':
+        elif self.batch_representation == 'embedding' and use_batch:
             self.decoder_input_dim = self.latent_dim + self.batch_dim
+        else:
+            self.decoder_input_dim = self.latent_dim
+
         self.decoder = Decoder(
             self.decoder_input_dim,
             self.hidden_dims,
             self.input_dim,
             normalization=self.use_norm
         ).to(self.device)
-        self.rbm = RBM(self.latent_dim).to(self.device)
-        self.batch_encoder = nn.Sequential(
-            nn.Embedding(self.n_batches, self.batch_dim),
-        ).to(self.device)
 
-        print(f"Set AnnData with input_dim={self.input_dim}, {self.n_batches} batches")
+        self.rbm = RBM(self.latent_dim).to(self.device)
+
+        if use_batch and self.batch_representation == 'embedding':
+            self.batch_encoder = nn.Embedding(self.n_batches, self.batch_dim).to(self.device)
+        else:
+            self.batch_encoder = None
+
+        if self.use_zinb_decoder:
+            self.zinb_decoder = RNAVAEDecoder(
+                self.decoder_input_dim,
+                self.hidden_dims,
+                self.input_dim,
+            ).to(self.device)
+
+        print(f"Set AnnData with input_dim={self.input_dim}, batches_used={self.use_batch}")
 
     def reparameterize(self, q_logits, rho):
         q = torch.sigmoid(q_logits)
@@ -325,26 +487,42 @@ class DVAE_RBM(nn.Module):
         return kl
 
     def forward(self, x, batch_indices):
-        batch_one_hot = self._get_batch_one_hot(batch_indices)
-
         q_logits = self.encoder(x)
         rho = Uniform(0, 1).sample(q_logits.shape).to(x.device)
         zeta, z, q = self.reparameterize(q_logits, rho)
-        batch_emb = self.batch_encoder(batch_indices)
-        if self.batch_representation == 'embedding':
-            decoder_input = torch.cat([zeta, batch_emb], dim=-1)
-        elif self.batch_representation == 'one-hot':
-            decoder_input = torch.cat([zeta, batch_one_hot], dim=-1)
 
-        x_recon = self.decoder(decoder_input)
-        recon_loss = F.mse_loss(x_recon, x, reduction='sum') / x.size(0)
+        if self.use_batch:
+            if self.batch_representation == 'embedding':
+                batch_emb = self.batch_encoder(batch_indices)
+                decoder_input = torch.cat([zeta, batch_emb], dim=-1)
+            elif self.batch_representation == 'one-hot':
+                batch_one_hot = self._get_batch_one_hot(batch_indices)
+                decoder_input = torch.cat([zeta, batch_one_hot], dim=-1)
+        else:
+            decoder_input = zeta
+
+        if self.use_zinb_decoder:
+            lib_size = x.sum(1).to(self.device).unsqueeze(1)
+            decoder_output = self.zinb_decoder(decoder_input)
+            px_rna_scale_final = decoder_output['px_rna_scale'] * lib_size
+            recon_loss = LossFunction.zinb_reconstruction_loss(
+                x,
+                mu=px_rna_scale_final,
+                theta=decoder_output['px_rna_rate'].exp(),
+                gate_logits=decoder_output['px_rna_dropout'],
+            ).sum() / x.size(0)
+        else:
+            x_recon = self.decoder(decoder_input)
+            recon_loss = F.mse_loss(x_recon, x, reduction='sum') / x.size(0)
+
         kl_loss = self.kl_divergence(z, q)
         elbo = -recon_loss - self.beta_kl * kl_loss
         return elbo, recon_loss, kl_loss, z, zeta
 
     def get_representation(self,
                            adata=None,
-                           batch_size=128):
+                           batch_size=128,
+                           layer_key=None):
         """
         Extract batch-corrected latent representations.
         """
@@ -353,8 +531,16 @@ class DVAE_RBM(nn.Module):
             raise ValueError("No AnnData object provided or set")
         adata = adata if adata is not None else self.adata
 
-        adata_array = adata.X.toarray() if hasattr(adata.X, 'toarray') else adata.X
-        batch_indices = torch.tensor(adata.obs[self.batch_key].astype('category').cat.codes.values, dtype=torch.long)
+        if layer_key is not None:
+            adata_array = adata.layers[layer_key].toarray() if hasattr(adata.layers[layer_key], 'toarray') else adata.layers[layer_key]
+        else:
+            adata_array = adata.X.toarray() if hasattr(adata.X, 'toarray') else adata.X
+
+        if self.use_batch:
+            batch_indices = torch.tensor(adata.obs[self.batch_key].astype('category').cat.codes.values,
+                                         dtype=torch.long)
+        else:
+            batch_indices = torch.zeros(adata.shape[0], dtype=torch.long)
 
         dataset = scDataset(adata_array, batch_indices)
         dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=4)
@@ -382,15 +568,23 @@ class DVAE_RBM(nn.Module):
             weight_decay=1e-5,
             rbm_lr=1e-3,
             early_stopping=True,
-            early_stopping_patience=20,
-            n_epochs_kl_warmup=None):
+            early_stopping_patience=30,
+            n_epochs_kl_warmup=None,
+            layer_key=None):
 
         if adata is None and self.adata is None:
             raise ValueError("No AnnData object provided or set")
         adata = adata if adata is not None else self.adata
+        if layer_key is not None:
+            adata_array = adata.layers[layer_key].toarray() if hasattr(adata.layers[layer_key], 'toarray') else adata.layers[layer_key]
+        else:
+            adata_array = adata.X.toarray() if hasattr(adata.X, 'toarray') else adata.X
 
-        adata_array = adata.X.toarray() if hasattr(adata.X, 'toarray') else adata.X
-        batch_indices = torch.tensor(adata.obs[self.batch_key].astype('category').cat.codes.values, dtype=torch.long)
+        if self.use_batch:
+            batch_indices = torch.tensor(adata.obs[self.batch_key].astype('category').cat.codes.values,
+                                         dtype=torch.long)
+        else:
+            batch_indices = torch.zeros(adata.shape[0], dtype=torch.long)
 
         if early_stopping:
             train_indices, val_indices = train_test_split(

@@ -3,6 +3,8 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 import numpy as np
+from sklearn.metrics import confusion_matrix
+
 
 plt.rcParams.update({
     'figure.titlesize': 7,  # 控制 suptitle 的字体大小
@@ -23,169 +25,69 @@ plt.rcParams.update({
 })
 
 
-# def visualize_folds(performance_df_list, vis_cols, methods_list, datasetName):
-#     """
-#     Visualize the performance of different methods across folds using box plots.
-#
-#     Parameters:
-#     - performance_df_list: List of DataFrames, each containing performance metrics for 5 folds.
-#     - vis_cols: List of column names (metrics) to visualize.
-#     - methods_list: List of method names corresponding to performance_df_list.
-#     """
-#     # 输入检查
-#     if len(performance_df_list) != len(methods_list):
-#         raise ValueError("Length of performance_df_list must match length of methods_list.")
-#
-#     for df in performance_df_list:
-#         for col in vis_cols:
-#             if col not in df.columns:
-#                 raise ValueError(f"Column '{col}' not found in one of the DataFrames.")
-#
-#     # 设置绘图风格
-#
-#     # 计算子图布局
-#     n_cols = len(vis_cols)
-#     fig, axes = plt.subplots(1, n_cols, figsize=(n_cols * 1.5, 3), sharey=False)
-#     if n_cols == 1:
-#         axes = [axes]  # 确保 axes 是列表，方便统一处理
-#
-#     # 为每个指标绘制箱线图
-#     for idx, metric in enumerate(vis_cols):
-#         # 收集所有方法的五折数据
-#         data_to_plot = []
-#         for method_idx, (df, method) in enumerate(zip(performance_df_list, methods_list)):
-#             metric_data = df[metric].dropna().values  # 获取该方法的五折数据
-#             data_to_plot.extend([(method, value) for value in metric_data])
-#
-#         # 转换为 DataFrame 用于 seaborn
-#         plot_df = pd.DataFrame(data_to_plot, columns=['Method', metric])
-#
-#         # 绘制箱线图
-#         # Draw box plot with hue to fix palette warning
-#         sns.boxplot(
-#             x='Method',
-#             y=metric,
-#             hue='Method',  # Assign x variable to hue
-#             data=plot_df,
-#             ax=axes[idx],
-#             palette='Set2',
-#             legend=False  # Disable legend to avoid redundancy
-#         )
-#
-#         # 设置标题和标签
-#         axes[idx].set_title(f'{metric} Across Folds')
-#         axes[idx].set_xlabel('Method')
-#         axes[idx].set_ylabel(metric)
-#
-#         # 旋转 x 轴标签以避免重叠
-#         axes[idx].tick_params(axis='x', rotation=45)
-#
-#     # 调整布局
-#     plt.tight_layout()
-#
-#     # 显示图形
-#     plt.savefig(f'{datasetName}_5_folds_klwarm.png', dpi=1000)
-#
-#     return fig
-
-# def visualize_folds(performance_df_list, vis_cols, methods_list, datasetName):
-#     """
-#     Visualize the performance of different methods across folds using box plots in a single figure with vertical lines separating methods.
-#
-#     Parameters:
-#     - performance_df_list: List of DataFrames, each containing performance metrics for 5 folds.
-#     - vis_cols: List of column names (metrics) to visualize.
-#     - methods_list: List of method names corresponding to performance_df_list.
-#     """
-#     # 输入检查
-#     if len(performance_df_list) != len(methods_list):
-#         raise ValueError("Length of performance_df_list must match length of methods_list.")
-#
-#     for df in performance_df_list:
-#         for col in vis_cols:
-#             if col not in df.columns:
-#                 raise ValueError(f"Column '{col}' not found in one of the DataFrames.")
-#
-#     # 设置绘图风格
-#     # sns.set_style("whitegrid")
-#
-#     # 创建单个图形
-#     fig, ax = plt.subplots(figsize=(len(vis_cols) * len(methods_list) * 0.3, 3))
-#
-#     # 准备数据
-#     data_to_plot = []
-#     for method_idx, (df, method) in enumerate(zip(performance_df_list, methods_list)):
-#         for metric in vis_cols:
-#             metric_data = df[metric].dropna().values
-#             for value in metric_data:
-#                 data_to_plot.append((metric, method, value))
-#
-#     # 转换为 DataFrame
-#     plot_df = pd.DataFrame(data_to_plot, columns=['Metric', 'Method', 'Value'])
-#
-#     # 计算每个箱线图的宽度和位置
-#     n_methods = len(methods_list)
-#     box_width = 0.9 / n_methods  # 每个方法的箱线图宽度
-#     group_width = n_methods * box_width
-#     metric_positions = np.arange(len(vis_cols)) * (group_width + 0.5)  # 每组的起始位置
-#
-#     # 绘制箱线图
-#     for i, metric in enumerate(vis_cols):
-#         for j, method in enumerate(methods_list):
-#             # 计算每个箱线图的精确位置
-#             pos = metric_positions[i] + j * box_width
-#             # 筛选数据
-#             metric_data = plot_df[(plot_df['Metric'] == metric) & (plot_df['Method'] == method)]['Value']
-#             # 绘制箱线图
-#             ax.boxplot(
-#                 metric_data,
-#                 positions=[pos],
-#                 widths=box_width * 0.9,
-#                 patch_artist=True,
-#                 boxprops=dict(facecolor=sns.color_palette("Set2")[j], color='black'),
-#                 medianprops=dict(color='black'),
-#                 whiskerprops=dict(color='black'),
-#                 capprops=dict(color='black'),
-#                 flierprops=dict(marker='o', markersize=5, markerfacecolor=sns.color_palette("Set2")[j])
-#             )
-#             # # # 在方法之间添加分隔线
-#             # if j < n_methods - 1:
-#             #     line_pos = pos + box_width
-#             #     ax.axvline(x=line_pos, color='gray', linestyle='--', alpha=0.5, ymin=0, ymax=1)
-#
-#     # 设置 x 轴标签
-#     ax.set_xticks(metric_positions + group_width / 2 - box_width / 2)
-#     ax.set_xticklabels(vis_cols)
-#
-#     # 创建图例
-#     handles = [plt.Rectangle((0, 0), 1, 1, facecolor=sns.color_palette("Set2")[i]) for i in range(len(methods_list))]
-#     ax.legend(handles, methods_list, title='Methods', bbox_to_anchor=(1.05, 1), loc='upper left')
-#
-#     # 设置标题和标签
-#     ax.set_title('Performance Across Folds')
-#     ax.set_xlabel('Metrics')
-#     ax.set_ylabel('Performance')
-#
-#     # 旋转 x 轴标签
-#     # ax.tick_params(axis='x', rotation=45)
-#
-#     # 保存图形
-#     plt.savefig(f'{datasetName}_5_folds_klwarm.png', dpi=1000, bbox_inches='tight')
-#
-#     return fig
-
-# def
-
-def visualize_folds(performance_df_list, vis_cols, methods_list, datasetName, filename, y_start=0.3):
+def plot_confusion_matrix(y_true, y_pred, labels, dataset_name, fold_id, output_dir='result/', model_name=''):
     """
-    Visualize the performance of different methods across folds using bar plots with error bars in a single figure with vertical lines separating methods.
+    绘制混淆矩阵，展示各个类别的细胞分类结果，固定为正方形，按真实标签百分比显示，不标注数字，横纵坐标轴字体大小为4。
+
+    参数:
+        y_true: 真实标签
+        y_pred: 预测标签
+        labels: 类别标签（未编码的原始标签）
+        dataset_name: 数据集名称
+        fold_id: 交叉验证折编号
+        output_dir: 输出目录
+        model_name: 模型名称
+    """
+    # 计算混淆矩阵
+    cm = confusion_matrix(y_true, y_pred)
+
+    # 按真实标签（行）归一化为百分比
+    cm_normalized = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis]
+    cm_normalized = np.nan_to_num(cm_normalized)  # 处理除零情况
+
+    # 创建图形
+    plt.figure(figsize=(3.5, 3.5))
+
+    # 使用seaborn绘制热图，固定为正方形，不标注数字
+    ax = sns.heatmap(cm_normalized,
+                     annot=False,
+                     cmap='Blues',
+                     xticklabels=labels,
+                     yticklabels=labels,
+                     square=True)
+
+    # 设置标题和标签
+    plt.title(f'Confusion Matrix for {dataset_name} (Fold {fold_id})')
+    plt.xlabel('Predicted Label')
+    plt.ylabel('True Label')
+
+    # 设置横纵坐标轴字体大小为4
+    plt.tick_params(axis='x', labelsize=4)
+    plt.tick_params(axis='y', labelsize=4)
+
+    # 设置颜色条刻度标签字体大小为4
+    cbar = ax.collections[0].colorbar
+    cbar.ax.tick_params(labelsize=4)
+
+    # 保存图像
+    output_path = f'{output_dir}/{model_name}_confusion_matrix_fold{fold_id}.pdf'
+    plt.savefig(output_path, dpi=1000, bbox_inches='tight')
+    plt.close()
+
+
+def visualize_folds(performance_df_list, vis_cols, methods_list, datasetName, filename, y_start=0.3, plot_type='bar'):
+    """
+    Visualize the performance of different methods across folds using bar plots or box plots.
 
     Parameters:
     - performance_df_list: List of DataFrames, each containing performance metrics for 5 folds.
     - vis_cols: List of column names (metrics) to visualize.
     - methods_list: List of method names corresponding to performance_df_list.
+    - datasetName: Name of the dataset.
+    - filename: Output filename (without extension).
+    - y_start: Minimum value of y-axis.
+    - plot_type: 'bar' or 'box', type of plot to generate.
     """
-    # 输入检查
     if len(performance_df_list) != len(methods_list):
         raise ValueError("Length of performance_df_list must match length of methods_list.")
 
@@ -194,60 +96,65 @@ def visualize_folds(performance_df_list, vis_cols, methods_list, datasetName, fi
             if col not in df.columns:
                 raise ValueError(f"Column '{col}' not found in one of the DataFrames.")
 
-    # 创建单个图形
-    fig, ax = plt.subplots(figsize=(len(vis_cols) * len(methods_list) * 0.15, 2))
-
-    # 计算每个箱线图的宽度和位置
     n_methods = len(methods_list)
-    bar_width = 0.9 / n_methods  # 每个方法的柱状图宽度
-    group_width = n_methods * bar_width
-    metric_positions = np.arange(len(vis_cols)) * (group_width + 0.2)  # 每组的起始位置
+    n_metrics = len(vis_cols)
+    group_width = 0.8  # 控制每个 metric 的总宽度
+    bar_width = group_width / n_methods
 
-    # 绘制柱状图
-    for i, metric in enumerate(vis_cols):
-        for j, (method, df) in enumerate(zip(methods_list, performance_df_list)):
-            # 计算均值和标准差
-            metric_data = df[metric].dropna().values
-            mean_value = np.mean(metric_data)
-            std_value = np.std(metric_data, ddof=1)  # 使用样本标准差
-            # 计算柱状图的精确位置
-            pos = metric_positions[i] + j * bar_width
-            # 绘制柱状图
-            ax.bar(
-                pos,
-                mean_value,
-                yerr=std_value,  # 添加误差棒（标准差）
-                width=bar_width * 0.9,
-                color=sns.color_palette("Set2")[j],
-                edgecolor='black',
-                linewidth=0.3,  # 设置描边宽度（可调整）
-                error_kw=dict(lw=0.3, capsize=1, capthick=0.3),  # 误差棒设置
-                label=method if i == 0 else None  # 仅为第一个指标添加图例
-            )
-            # # 在方法之间添加分隔线
-            # if j < n_methods - 1:
-            #     line_pos = pos + bar_width
-            #     ax.axvline(x=line_pos, color='gray', linestyle='--', alpha=0.5, ymin=0, ymax=1)
+    fig, ax = plt.subplots(figsize=(n_metrics * n_methods * 0.4, 2.5))
 
-    # 设置 x 轴标签
-    ax.set_xticks(metric_positions + group_width / 2 - bar_width / 2)
-    ax.set_xticklabels(vis_cols)
+    palette = sns.color_palette("Set2", n_methods)
 
-    # 创建图例
-    ax.legend(title='Methods', bbox_to_anchor=(1.05, 1), loc='upper left')
+    if plot_type == 'bar':
+        metric_positions = np.arange(n_metrics)
+        for i, metric in enumerate(vis_cols):
+            for j, (method, df) in enumerate(zip(methods_list, performance_df_list)):
+                metric_data = df[metric].dropna().values
+                mean = np.mean(metric_data)
+                std = np.std(metric_data, ddof=1)
+                pos = metric_positions[i] - group_width/2 + j * bar_width + bar_width/2
+                ax.bar(pos, mean,
+                       yerr=std,
+                       width=bar_width * 0.9,
+                       color=palette[j],
+                       edgecolor='black',
+                       linewidth=0.3,
+                       error_kw=dict(lw=0.3, capsize=1, capthick=0.3),
+                       label=method if i == 0 else None)
+        ax.set_xticks(metric_positions)
+        ax.set_xticklabels(vis_cols)
 
-    # 设置标题和标签
-    ax.set_title('Performance Across Folds')
-    ax.set_xlabel('Metrics')
-    ax.set_ylabel('Performance')
+    elif plot_type == 'box':
+        all_data = []
+        for metric in vis_cols:
+            for method, df in zip(methods_list, performance_df_list):
+                for value in df[metric].dropna().values:
+                    all_data.append({
+                        'Metric': metric,
+                        'Method': method,
+                        'Value': value
+                    })
+        import pandas as pd
+        plot_df = pd.DataFrame(all_data)
+        sns.boxplot(data=plot_df,
+                    x='Metric',
+                    y='Value',
+                    hue='Method',
+                    palette=palette,
+                    ax=ax,
+                    linewidth=0.5,
+                    fliersize=1)
 
-    # 设置 y 轴范围，从 0.3 开始
+    else:
+        raise ValueError("plot_type must be either 'bar' or 'box'.")
+
+    ax.set_ylabel("Performance")
     ax.set_ylim(bottom=y_start)
+    ax.set_title("Performance Across Folds")
+    ax.legend(title="Methods", bbox_to_anchor=(1.02, 1), loc='upper left')
 
     os.makedirs('figures/clustering_performance/', exist_ok=True)
-    # 保存图形
     plt.savefig(f'figures/clustering_performance/{datasetName}_{filename}.pdf', dpi=1000, bbox_inches='tight')
-
     return fig
 
 
@@ -314,6 +221,7 @@ def visualize_latentDims(df_list, vis_cols, latent_dims, datasetName, methodsLis
                 bbox_inches='tight')
 
 
+#   雷达图
 def plot_radar_chart(df,
                      title="Radar Chart",
                      figsize=(2, 2),
@@ -629,215 +537,3 @@ def plot_loss_curves(loss_lists, method_names, start_step=0, title="Loss vs. Tra
     plt.close()
 
 
-if __name__ == '__main__':
-
-
-    # from dataset_param_dict import dataset_params
-    #
-    # # overall 雷达图
-    # df_dict = {}
-    # for dataset_name in dataset_params.keys():
-    #     RBM_VAE_df = pd.read_csv(f'result/{dataset_name}/RBM_VAE_{dataset_name}_clustering_latentDim256_layernorm_batchSize128_multiLayers_weight_decay.csv')
-    #     VAE_df = pd.read_csv(f'result/{dataset_name}/VAE_{dataset_name}_clustering_latentDim128_weight_decay.csv')
-    #     SCVI_df = pd.read_csv(f'result/{dataset_name}/SCVI_{dataset_name}_clustering.csv')
-    #     LDVAE_df = pd.read_csv(f'result/{dataset_name}/LDVAE_{dataset_name}_clustering.csv')
-    #     AUTOZI_df = pd.read_csv(f'result/{dataset_name}/AUTOZI_{dataset_name}_clustering.csv')
-    #
-    #     RBM_average_bio = RBM_VAE_df[['leiden_ARI', 'leiden_AMI', 'leiden_NMI', 'leiden_FMI']].mean().mean()
-    #     VAE_average_bio = VAE_df[['leiden_ARI', 'leiden_AMI', 'leiden_NMI', 'leiden_FMI']].mean().mean()
-    #     SCVI_average_bio = SCVI_df[['leiden_ARI', 'leiden_AMI', 'leiden_NMI', 'leiden_FMI']].mean().mean()
-    #     LDVAE_average_bio = LDVAE_df[['leiden_ARI', 'leiden_AMI', 'leiden_NMI', 'leiden_FMI']].mean().mean()
-    #     AUTOZI_average_bio = AUTOZI_df[['leiden_ARI', 'leiden_AMI', 'leiden_NMI', 'leiden_FMI']].mean().mean()
-    #
-    #     df_dict[dataset_name] = [RBM_average_bio, VAE_average_bio, SCVI_average_bio, LDVAE_average_bio, AUTOZI_average_bio]
-    #
-    # df = pd.DataFrame(df_dict, index=['RBM-VAE', 'VAE', 'SCVI', 'LDVAE', 'AUTOZI'])
-    # plot_radar_chart(df, title="Model Performance Comparison", save_path='overall_bio.pdf', r_range=[0.5, 0.75])
-    #
-    # for dataset_name in dataset_params.keys():
-    #     RBM_VAE_df = pd.read_csv(f'result/{dataset_name}/RBM_VAE_{dataset_name}_clustering_latentDim256_layernorm_batchSize128_multiLayers_weight_decay.csv')
-    #     VAE_df = pd.read_csv(f'result/{dataset_name}/VAE_{dataset_name}_clustering_latentDim128_weight_decay.csv')
-    #     SCVI_df = pd.read_csv(f'result/{dataset_name}/SCVI_{dataset_name}_clustering.csv')
-    #     LDVAE_df = pd.read_csv(f'result/{dataset_name}/LDVAE_{dataset_name}_clustering.csv')
-    #     AUTOZI_df = pd.read_csv(f'result/{dataset_name}/AUTOZI_{dataset_name}_clustering.csv')
-    #
-    #     RBM_average_bio = RBM_VAE_df[['Batch correction']].mean().mean()
-    #     VAE_average_bio = VAE_df[['Batch correction']].mean().mean()
-    #     SCVI_average_bio = SCVI_df[['Batch correction']].mean().mean()
-    #     LDVAE_average_bio = LDVAE_df[['Batch correction']].mean().mean()
-    #     AUTOZI_average_bio = AUTOZI_df[['Batch correction']].mean().mean()
-    #
-    #     df_dict[dataset_name] = [RBM_average_bio, VAE_average_bio, SCVI_average_bio, LDVAE_average_bio, AUTOZI_average_bio]
-    #
-    # df = pd.DataFrame(df_dict, index=['RBM-VAE', 'VAE', 'SCVI', 'LDVAE', 'AUTOZI'])
-    # plot_radar_chart(df, title="Model Performance Comparison", save_path='overall_batch.pdf', r_range=[0.4, 0.75])
-    #
-    #
-    #
-    # #    heatmap
-    # for dataset_name in dataset_params.keys():
-    #     col_use = ['leiden_ARI', 'leiden_AMI', 'leiden_NMI', 'leiden_FMI', 'iLISI', 'KBET', 'Graph connectivity', 'PCR comparison', 'Batch correction']
-    #     batch_use = ['iLISI', 'KBET', 'Graph connectivity', 'PCR comparison', 'Batch correction']
-    #
-    #     RBM_VAE_df = pd.read_csv(f'result/{dataset_name}/RBM_VAE_{dataset_name}_clustering_latentDim256_layernorm_batchSize128_multiLayers_weight_decay.csv')
-    #     VAE_df = pd.read_csv(f'result/{dataset_name}/VAE_{dataset_name}_clustering_latentDim128_weight_decay.csv')
-    #     SCVI_df = pd.read_csv(f'result/{dataset_name}/SCVI_{dataset_name}_clustering.csv')
-    #     LDVAE_df = pd.read_csv(f'result/{dataset_name}/LDVAE_{dataset_name}_clustering.csv')
-    #     AUTOZI_df = pd.read_csv(f'result/{dataset_name}/AUTOZI_{dataset_name}_clustering.csv')
-    #
-    #     RBM_average_bio = RBM_VAE_df.mean()
-    #     VAE_average_bio = VAE_df.mean()
-    #     SCVI_average_bio = SCVI_df.mean()
-    #     LDVAE_average_bio = LDVAE_df.mean()
-    #     AUTOZI_average_bio = AUTOZI_df.mean()
-    #     # 为每个方法添加名称
-    #     RBM_average_bio.name = f'RBM-VAE'
-    #     VAE_average_bio.name = f'VAE'
-    #     SCVI_average_bio.name = f'SCVI'
-    #     LDVAE_average_bio.name = f'LDVAE'
-    #     AUTOZI_average_bio.name = f'AUTOZI'
-    #
-    #     # 合并为一个 DataFrame
-    #     all_df = pd.concat([RBM_average_bio, VAE_average_bio, SCVI_average_bio, LDVAE_average_bio, AUTOZI_average_bio],
-    #                        axis=1).T
-    #     bio_all_df = all_df[col_use]
-    #     bio_all_df['Bio conservation'] = bio_all_df[col_use].mean(axis=1, skipna=True)
-    #     batch_all_df = all_df[batch_use]
-    #
-    #     # 打印当前数据集的 DataFrame
-    #     print(f"\nDataFrame for {dataset_name}:")
-    #     # Customized usage
-    #     plot_score_rank_circles(
-    #         bio_all_df,
-    #         rank_ascending=False,  # Higher score = Rank 1
-    #         cmap_ranks='Reds_r',  # Different colormap
-    #         score_range=(0, 1.0),
-    #         title="Model Benchmark Results",
-    #         output_file=f"{dataset_name}_benchmark_bio_plot.pdf" # Uncomment to save instead of show
-    #     )
-    #
-    #     plot_score_rank_circles(
-    #         batch_all_df,
-    #         rank_ascending=False,  # Higher score = Rank 1
-    #         cmap_ranks='Blues_r',  # Different colormap
-    #         score_range=(0, 1.0),
-    #         title="Model Benchmark Results",
-    #         output_file=f"{dataset_name}_benchmark_batch_plot.pdf" # Uncomment to save instead of show
-    #     )
-    #
-    #
-    # #benchmark
-    # col_use = ['leiden_ARI', 'leiden_AMI', 'leiden_NMI', 'leiden_FMI',]
-    # dataset_name = 'HLCA_core'
-    # RBM_VAE_df = pd.read_csv(
-    #     f'result/{dataset_name}/RBM_VAE_{dataset_name}_clustering_latentDim256_layernorm_batchSize128_multiLayers_weight_decay.csv')
-    # RBM_VAE_df['Bio conservation'] = RBM_VAE_df[col_use].mean(axis=1, skipna=True)
-    #
-    # VAE_df = pd.read_csv(f'result/{dataset_name}/VAE_{dataset_name}_clustering_latentDim128_weight_decay.csv')
-    # VAE_df['Bio conservation'] = VAE_df[col_use].mean(axis=1, skipna=True)
-    #
-    # SCVI_df = pd.read_csv(f'result/{dataset_name}/SCVI_{dataset_name}_clustering.csv')
-    # SCVI_df['Bio conservation'] = SCVI_df[col_use].mean(axis=1, skipna=True)
-    #
-    # # tr_VAE_df = pd.read_csv(f'result/{dataset_name}/trVAE_{dataset_name}_clustering.csv')
-    # LDVAE_df = pd.read_csv(f'result/{dataset_name}/LDVAE_{dataset_name}_clustering.csv')
-    # LDVAE_df['Bio conservation'] = LDVAE_df[col_use].mean(axis=1, skipna=True)
-    #
-    # AUTOZI_df = pd.read_csv(f'result/{dataset_name}/AUTOZI_{dataset_name}_clustering.csv')
-    # AUTOZI_df['Bio conservation'] = AUTOZI_df[col_use].mean(axis=1, skipna=True)
-    #
-    #
-    # # visualize_folds([RBM_VAE_df,  RBM_VAE_df2, RBM_VAE_df3, SCVI_df], ['ARI', 'AMI', 'NMI', 'HOM', 'FMI'], ['RBM_VAE', 'RBM_VAE_wd_layer_bs2048', 'RBM_VAE_wd', 'SCVI'], dataset_name, 'bio_conservation')
-    #
-    # visualize_folds([RBM_VAE_df, SCVI_df, LDVAE_df, AUTOZI_df, VAE_df],
-    #                 ['leiden_ARI', 'leiden_AMI', 'leiden_NMI', 'leiden_FMI', 'Bio conservation'],
-    #                 ['RBM_VAE', 'SCVI', 'LDVAE', 'AUTOZI', 'VAE'],
-    #                 dataset_name,
-    #                 'bio_conservation_bm')
-    # visualize_folds([RBM_VAE_df, SCVI_df, LDVAE_df, AUTOZI_df, VAE_df],
-    #                 ['iLISI', 'KBET', 'Graph connectivity', 'Batch correction'],
-    #                 ['RBM_VAE', 'SCVI', 'LDVAE', 'AUTOZI', 'VAE'],
-    #                 dataset_name,
-    #                 'batch_remove_bm',
-    #                 y_start=0)
-    #
-    #
-    # CIM_df = pd.read_csv('/home/wfa/project/QVAE/model/result/pancreas/cim_result.csv')
-    # gibbs_df = pd.read_csv('/home/wfa/project/QVAE/model/result/pancreas/gibbs_result.csv')
-    #
-    # visualize_folds([CIM_df, gibbs_df],
-    #                 ['ARI', 'AMI', 'NMI', 'FMI'],
-    #                 ['CIM', "Gibbs"],
-    #                 'pancreas',
-    #                 'CIM')
-    #
-    # RBM_df_list = []
-    # VAE_df_list = []
-    # latent_dims = [16, 32, 64, 128, 256, 512]
-    # methods = ['RBM-VAE']
-    #
-    # dataset_name = 'HLCA_core'
-    # for latent_dim in latent_dims:
-    #     RBM_df_list.append(pd.read_csv(f'result/{dataset_name}/RBM_VAE_{dataset_name}_clustering_latentDim{latent_dim}.csv'))
-    # # for latent_dim in latent_dims:
-    # #     VAE_df_list.append(pd.read_csv(f'result/{dataset_name}/VAE_{dataset_name}_clustering_latentDim{latent_dim}.csv'))
-    # df_list = [RBM_df_list]
-    #
-    # visualize_latentDims(df_list, ['ARI', 'AMI', 'NMI', 'FMI'], latent_dims, dataset_name, methods, 'latent dim', 'compare')
-
-
-    import pickle
-
-    # Path to your .pkl file
-    gibbs_path = '/home/wfa/project/QVAE/model/figures/clustering_performance/gibbs_val_elbo.pkl'
-    CIM_path = '/home/wfa/project/QVAE/model/figures/clustering_performance/cim_val_elbo.pkl'
-
-    # Open and load the pickle file
-    with open(gibbs_path, 'rb') as file:
-        gibbs_data = pickle.load(file)
-
-    with open(CIM_path, 'rb') as file:
-        CIM_data = pickle.load(file)
-
-    # Inspect the contents
-
-    plot_loss_curves([gibbs_data['fold1'], CIM_data['fold1']], ['Gibbs', 'CIM'],)
-    plot_loss_curves([gibbs_data['fold1'], CIM_data['fold1']], ['Gibbs', 'CIM'], start_step=100, output_file='step100.pdf')
-
-    # RBM_df_list = []
-    # VAE_df_list = []
-    # latent_dims = [16, 32, 64, 128, 256, 512]
-    # methods = ['RBM-VAE']
-    #
-    # dataset_name = 'pancreas'
-    # for latent_dim in latent_dims:
-    #     RBM_df_list.append(pd.read_csv(f'result/{dataset_name}/RBM_VAE_pancreas_clustering_latentDim256_layernorm_batchSize{}_weight_decay.csv'))
-    #
-    # # for latent_dim in latent_dims:
-    # #     VAE_df_list.append(pd.read_csv(f'result/{dataset_name}/VAE_{dataset_name}_clustering_latentDim{latent_dim}_weight_decay.csv'))
-    #
-    # # for latent_dim in latent_dims:
-    # #     RBM_df_list2.append(pd.read_csv(f'result/{dataset_name}/RBM_VAE_{dataset_name}_clustering_latentDim{latent_dim}_weight_decay.csv'))
-    # df_list = [RBM_df_list]
-    #
-    # for col in ['ARI', 'AMI', 'NMI', 'HOM', 'FMI']:
-    #     visualize_latentDims(df_list, [col], latent_dims, dataset_name, methods)
-
-    # RBM_df_list = []
-    # VAE_df_list = []
-    # batch_dims = [128, 256, 512, 1024, 2048]
-    # methods = ['RBM-VAE']
-    #
-    # dataset_name = 'immune'
-    # for batch_dim in batch_dims:
-    #     RBM_df_list.append(pd.read_csv(f'result/{dataset_name}/RBM_VAE_{dataset_name}_clustering_latentDim256_layernorm_batchSize{batch_dim}_weight_decay.csv'))
-    #
-    # # for latent_dim in latent_dims:
-    # #     VAE_df_list.append(pd.read_csv(f'result/{dataset_name}/VAE_{dataset_name}_clustering_latentDim{latent_dim}_weight_decay.csv'))
-    #
-    # # for latent_dim in latent_dims:
-    # #     RBM_df_list2.append(pd.read_csv(f'result/{dataset_name}/RBM_VAE_{dataset_name}_clustering_latentDim{latent_dim}_weight_decay.csv'))
-    # df_list = [RBM_df_list]
-    #
-    # # for col in ['leiden_ARI', 'leiden_AMI', 'leiden_NMI', 'leiden_FMI']:
-    # visualize_latentDims(df_list, ['leiden_ARI', 'leiden_AMI', 'leiden_NMI', 'leiden_FMI'], batch_dims, dataset_name, methods, 'batch size', 'layernorm')
