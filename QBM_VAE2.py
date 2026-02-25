@@ -308,12 +308,13 @@ class RBM(nn.Module):
         kw.utils.CheckpointManager.save_dir = f"./cim_test2/"
         self.worker = kw.cim.CIMOptimizer()
         self.ising_matrix = None # To store ising matrix if needed
+        self.step_counter = 0
 
     def energy(self, z):
         z = z.float()
         h_term = torch.sum(z * self.h, dim=-1)
         w_term = torch.sum((z @ self.W) * z, dim=-1)  # 注意对称性
-        return h_term + w_term
+        return -(h_term + w_term)
     
     # Added from DVAE_RBM
     def _create_ising_matrix(self, number_of_hidden_units):
@@ -349,13 +350,16 @@ class RBM(nn.Module):
         return kw.cim.adjust_ising_matrix_precision(ising_matrix, bit_width=14)
     
     # Added from DVAE_RBM and renamed
-    def ising_sample(self, number_of_samples, number_of_hidden_units, fold_id, step, behavior):
+    def ising_sample(self, number_of_samples):
+        self.step_counter += 1
         self.worker.size_limit = number_of_samples
+        number_of_hidden_units = self.latent_dim
         ising_matrix = self._create_ising_matrix(number_of_hidden_units)
         # 调整精度
         ising_matrix = self.adjust_precision(ising_matrix)
         self.ising_matrix = ising_matrix
-        self.worker.task_name = f"fold-{fold_id}_step-{step}_{behavior}"
+        # self.worker.task_name = f"step-{step}_{behavior}"
+        self.worker.task_name = f"rbm_step_{self.step_counter}"
         
         output = self.worker.solve(ising_matrix)
 
@@ -370,7 +374,7 @@ class RBM(nn.Module):
             z = (torch.rand_like(z) < probs).float()
         return z
 
-    def compute_gradients(self, z_positive, num_negative_samples=64, gibbs_steps=50):
+    def compute_gradients(self, z_positive, num_negative_samples=64):
         """计算正相和负相的梯度"""
         # 正相：E_q[∂E/∂θ]
         z_positive = z_positive.float()
@@ -378,7 +382,8 @@ class RBM(nn.Module):
         positive_w_grad = torch.einsum('bi,bj->ij', z_positive, z_positive) / z_positive.size(0)  # ∂E/∂W = z_l z_m
 
         # 负相：E_p[∂E/∂θ]
-        z_negative = self.gibbs_sampling(num_negative_samples, steps=gibbs_steps)
+        # z_negative = self.gibbs_sampling(num_negative_samples, steps=gibbs_steps)
+        z_negative = self.ising_sample(num_negative_samples)
         negative_h_grad = z_negative.mean(dim=0)
         negative_w_grad = torch.einsum('bi,bj->ij', z_negative, z_negative) / z_negative.size(0)
 
@@ -522,7 +527,8 @@ class QBM_VAE(nn.Module):
         log_q = q * torch.log(q) + (1 - q) * torch.log(1 - q)
         entropy = -log_q.sum(dim=-1)
         energy_pos = self.rbm.energy(z)
-        z_negative = self.rbm.gibbs_sampling(z.size(0))
+        # z_negative = self.rbm.gibbs_sampling(z.size(0))
+        z_negative = self.rbm.ising_sample(z.size(0))
         energy_neg = self.rbm.energy(z_negative)
         # 用负相能量的均值作为 logZ 的近似
         logZ = energy_neg.mean()
@@ -687,10 +693,10 @@ class QBM_VAE(nn.Module):
                 loss.backward()
 
                 # 手动计算RBM的梯度
-                # rbm_grads = self.rbm.compute_gradients(z.detach())  # z.detach()避免重复求导
-                # with torch.no_grad():
-                #     self.rbm.h.grad = rbm_grads['h']
-                #     self.rbm.W.grad = rbm_grads['W']
+                rbm_grads = self.rbm.compute_gradients(z.detach())  # z.detach()避免重复求导
+                with torch.no_grad():
+                    self.rbm.h.grad = rbm_grads['h']
+                    self.rbm.W.grad = rbm_grads['W']
 
                 optimizer.step()
                 rbm_optimizer.step()
@@ -743,5 +749,6 @@ class QBM_VAE(nn.Module):
                         self.load_state_dict(best_state_dict)
                     epoch_pbar.close()  # Close the progress bar early
                     break
+
 
         epoch_pbar.close()
